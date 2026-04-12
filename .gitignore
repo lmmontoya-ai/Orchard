@@ -1,0 +1,14 @@
+build/
+.vs/
+out/
+*.user
+*.suo
+*.pdb
+*.obj
+*.ilk
+*.log
+*.tmp
+*.cache
+Testing/
+_deps/
+

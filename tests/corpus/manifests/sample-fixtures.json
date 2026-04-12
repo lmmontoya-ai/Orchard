@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "fixtures": [
+    {
+      "id": "plain-user-data-placeholder",
+      "label": "Plain user-data placeholder",
+      "source_type": "image_file",
+      "relative_path": "tests/corpus/samples/plain-user-data.img",
+      "volume_role": "user_data",
+      "case_mode": "case_insensitive",
+      "encryption": "none",
+      "snapshots": "absent",
+      "system_volume_group": "none",
+      "compression_algorithms": ["none"],
+      "feature_flags": ["baseline_stub"],
+      "expected_policy": "MountReadWrite",
+      "notes": "M0 placeholder fixture used to verify repo plumbing."
+    },
+    {
+      "id": "snapshot-volume-placeholder",
+      "label": "Snapshot-bearing placeholder",
+      "source_type": "image_file",
+      "relative_path": "tests/corpus/samples/snapshot-volume.img",
+      "volume_role": "user_data",
+      "case_mode": "case_insensitive",
+      "encryption": "none",
+      "snapshots": "present",
+      "system_volume_group": "none",
+      "compression_algorithms": ["zlib"],
+      "feature_flags": ["snapshots_present"],
+      "expected_policy": "MountReadOnly",
+      "notes": "Represents the future v1 policy for snapshot-bearing user volumes."
+    },
+    {
+      "id": "sealed-system-placeholder",
+      "label": "Sealed system placeholder",
+      "source_type": "image_file",
+      "relative_path": "tests/corpus/samples/sealed-system.img",
+      "volume_role": "system",
+      "case_mode": "case_insensitive",
+      "encryption": "none",
+      "snapshots": "present",
+      "system_volume_group": "paired",
+      "compression_algorithms": ["lzfse"],
+      "feature_flags": ["sealed", "firmlink_group"],
+      "expected_policy": "Reject",
+      "notes": "Represents a modern macOS system volume kept out of the v1 writable tier."
+    }
+  ]
+}
+
