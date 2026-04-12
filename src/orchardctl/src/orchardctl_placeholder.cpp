@@ -6,4 +6,4 @@ std::string_view PlaceholderStatus() noexcept {
   return "orchardctl-stub";
 }
 
-}  // namespace orchard::orchardctl
+} // namespace orchard::orchardctl

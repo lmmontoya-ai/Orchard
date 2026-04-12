@@ -6,4 +6,4 @@ std::string_view PlaceholderStatus() noexcept {
   return "fs-winfsp-stub";
 }
 
-}  // namespace orchard::fs_winfsp
+} // namespace orchard::fs_winfsp

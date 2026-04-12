@@ -1,0 +1,17 @@
+---
+Checks: >-
+  -*,
+  bugprone-*,
+  -bugprone-exception-escape,
+  clang-analyzer-*,
+  -clang-analyzer-optin.core.EnumCastOutOfRange,
+  modernize-use-nullptr,
+  performance-*,
+  readability-duplicate-include,
+  readability-redundant-control-flow,
+  readability-redundant-string-cstr
+WarningsAsErrors: "*"
+FormatStyle: file
+HeaderFilterRegex: "^(src|tools|tests)/"
+SystemHeaders: false
+...

@@ -14,24 +14,24 @@ std::string EscapeJson(std::string_view input) {
 
   for (const char character : input) {
     switch (character) {
-      case '\\':
-        escaped += "\\\\";
-        break;
-      case '"':
-        escaped += "\\\"";
-        break;
-      case '\n':
-        escaped += "\\n";
-        break;
-      case '\r':
-        escaped += "\\r";
-        break;
-      case '\t':
-        escaped += "\\t";
-        break;
-      default:
-        escaped += character;
-        break;
+    case '\\':
+      escaped += "\\\\";
+      break;
+    case '"':
+      escaped += "\\\"";
+      break;
+    case '\n':
+      escaped += "\\n";
+      break;
+    case '\r':
+      escaped += "\\r";
+      break;
+    case '\t':
+      escaped += "\\t";
+      break;
+    default:
+      escaped += character;
+      break;
     }
   }
 
@@ -64,7 +64,8 @@ void PrintJson(const orchard::blockio::InspectionTargetInfo& target_info,
   std::cout << "    \"path\": \"" << EscapeJson(target_info.path.string()) << "\",\n";
   std::cout << "    \"kind\": \"" << orchard::blockio::ToString(target_info.kind) << "\",\n";
   std::cout << "    \"exists\": " << (target_info.exists ? "true" : "false") << ",\n";
-  std::cout << "    \"probe_candidate\": " << (target_info.probe_candidate ? "true" : "false") << ",\n";
+  std::cout << "    \"probe_candidate\": " << (target_info.probe_candidate ? "true" : "false")
+            << ",\n";
   std::cout << "    \"size_bytes\": ";
   if (target_info.size_bytes.has_value()) {
     std::cout << *target_info.size_bytes;
@@ -74,10 +75,13 @@ void PrintJson(const orchard::blockio::InspectionTargetInfo& target_info,
   std::cout << "\n";
   std::cout << "  },\n";
   std::cout << "  \"apfs\": {\n";
-  std::cout << "    \"probe_status\": \"" << orchard::apfs::ToString(inspection_result.status) << "\",\n";
+  std::cout << "    \"probe_status\": \"" << orchard::apfs::ToString(inspection_result.status)
+            << "\",\n";
   std::cout << "    \"container_magic\": "
-            << (inspection_result.apfs_container_magic_present ? "\"present\"" : "\"absent\"") << ",\n";
-  std::cout << "    \"suggested_mount_mode\": \"" << EscapeJson(inspection_result.suggested_mount_mode) << "\",\n";
+            << (inspection_result.apfs_container_magic_present ? "\"present\"" : "\"absent\"")
+            << ",\n";
+  std::cout << "    \"suggested_mount_mode\": \""
+            << EscapeJson(inspection_result.suggested_mount_mode) << "\",\n";
   std::cout << "    \"notes\": [\n";
 
   for (std::size_t index = 0; index < inspection_result.notes.size(); ++index) {
@@ -93,7 +97,7 @@ void PrintJson(const orchard::blockio::InspectionTargetInfo& target_info,
   std::cout << "}\n";
 }
 
-}  // namespace
+} // namespace
 
 int main(int argc, char** argv) {
   if (argc <= 1) {
@@ -113,4 +117,3 @@ int main(int argc, char** argv) {
   PrintJson(target_info, inspection_result);
   return 0;
 }
-

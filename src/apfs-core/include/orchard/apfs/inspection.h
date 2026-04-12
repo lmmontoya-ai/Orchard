@@ -26,5 +26,4 @@ struct StubInspectionResult {
 StubInspectionResult RunStubInspection(const blockio::InspectionTargetInfo& target_info);
 std::string_view ToString(ProbeStatus status) noexcept;
 
-}  // namespace orchard::apfs
-
+} // namespace orchard::apfs

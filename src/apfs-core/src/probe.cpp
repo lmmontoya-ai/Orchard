@@ -6,13 +6,13 @@ namespace orchard::apfs {
 namespace {
 
 constexpr std::array<std::uint8_t, 4> kNxsbMagic{
-  static_cast<std::uint8_t>('N'),
-  static_cast<std::uint8_t>('X'),
-  static_cast<std::uint8_t>('S'),
-  static_cast<std::uint8_t>('B'),
+    static_cast<std::uint8_t>('N'),
+    static_cast<std::uint8_t>('X'),
+    static_cast<std::uint8_t>('S'),
+    static_cast<std::uint8_t>('B'),
 };
 
-}  // namespace
+} // namespace
 
 bool ProbeContainerMagic(std::span<const std::uint8_t> bytes) noexcept {
   if (bytes.size() < kNxsbMagic.size()) {
@@ -28,5 +28,4 @@ bool ProbeContainerMagic(std::span<const std::uint8_t> bytes) noexcept {
   return true;
 }
 
-}  // namespace orchard::apfs
-
+} // namespace orchard::apfs

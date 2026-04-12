@@ -7,7 +7,8 @@
 namespace {
 
 void DetectsRegularFiles() {
-  const auto temp_path = std::filesystem::temp_directory_path() / "orchard_blockio_regular_file.img";
+  const auto temp_path =
+      std::filesystem::temp_directory_path() / "orchard_blockio_regular_file.img";
 
   {
     std::ofstream output(temp_path, std::ios::binary);
@@ -20,25 +21,26 @@ void DetectsRegularFiles() {
   ORCHARD_TEST_REQUIRE(info.probe_candidate);
   ORCHARD_TEST_REQUIRE(info.kind == orchard::blockio::TargetKind::kRegularFile);
   ORCHARD_TEST_REQUIRE(info.size_bytes.has_value());
-  ORCHARD_TEST_REQUIRE(*info.size_bytes == 7U);
+  const auto size_bytes = info.size_bytes.value_or(0);
+  ORCHARD_TEST_REQUIRE(size_bytes == 7U);
 
   std::filesystem::remove(temp_path);
 }
 
 void DetectsRawDevicePatterns() {
-  const auto info = orchard::blockio::InspectTargetPath(std::filesystem::path(R"(\\.\PhysicalDrive3)"));
+  const auto info =
+      orchard::blockio::InspectTargetPath(std::filesystem::path(R"(\\.\PhysicalDrive3)"));
 
   ORCHARD_TEST_REQUIRE(!info.exists);
   ORCHARD_TEST_REQUIRE(info.probe_candidate);
   ORCHARD_TEST_REQUIRE(info.kind == orchard::blockio::TargetKind::kRawDevice);
 }
 
-}  // namespace
+} // namespace
 
 int main() {
   return orchard_test::RunTests({
-    {"DetectsRegularFiles", &DetectsRegularFiles},
-    {"DetectsRawDevicePatterns", &DetectsRawDevicePatterns},
+      {"DetectsRegularFiles", &DetectsRegularFiles},
+      {"DetectsRawDevicePatterns", &DetectsRawDevicePatterns},
   });
 }
-

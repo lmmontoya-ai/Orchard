@@ -11,10 +11,10 @@ namespace {
 
 void DetectsNxsbMagic() {
   const std::array<std::uint8_t, 4> header{
-    static_cast<std::uint8_t>('N'),
-    static_cast<std::uint8_t>('X'),
-    static_cast<std::uint8_t>('S'),
-    static_cast<std::uint8_t>('B'),
+      static_cast<std::uint8_t>('N'),
+      static_cast<std::uint8_t>('X'),
+      static_cast<std::uint8_t>('S'),
+      static_cast<std::uint8_t>('B'),
   };
 
   ORCHARD_TEST_REQUIRE(orchard::apfs::ProbeContainerMagic(header));
@@ -22,10 +22,10 @@ void DetectsNxsbMagic() {
 
 void RejectsNonApfsMagic() {
   const std::array<std::uint8_t, 4> header{
-    static_cast<std::uint8_t>('B'),
-    static_cast<std::uint8_t>('A'),
-    static_cast<std::uint8_t>('D'),
-    static_cast<std::uint8_t>('!'),
+      static_cast<std::uint8_t>('B'),
+      static_cast<std::uint8_t>('A'),
+      static_cast<std::uint8_t>('D'),
+      static_cast<std::uint8_t>('!'),
   };
 
   ORCHARD_TEST_REQUIRE(!orchard::apfs::ProbeContainerMagic(header));
@@ -50,13 +50,12 @@ void StubInspectionReportsMagicForRegularFiles() {
   std::filesystem::remove(temp_path);
 }
 
-}  // namespace
+} // namespace
 
 int main() {
   return orchard_test::RunTests({
-    {"DetectsNxsbMagic", &DetectsNxsbMagic},
-    {"RejectsNonApfsMagic", &RejectsNonApfsMagic},
-    {"StubInspectionReportsMagicForRegularFiles", &StubInspectionReportsMagicForRegularFiles},
+      {"DetectsNxsbMagic", &DetectsNxsbMagic},
+      {"RejectsNonApfsMagic", &RejectsNonApfsMagic},
+      {"StubInspectionReportsMagicForRegularFiles", &StubInspectionReportsMagicForRegularFiles},
   });
 }
-

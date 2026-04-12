@@ -230,14 +230,15 @@ A task is only `Done` when all apply:
 ### Review Snapshot
 
 - Review date: `2026-04-12`
-- Locally completed: `M0-T01`, `M0-T02`, `M0-T04`, `M0-T05`, `M0-T06`
+- Locally completed: `M0-T01`, `M0-T02`, `M0-T03`, `M0-T04`, `M0-T05`, `M0-T06`
 - Latest local verification:
   - `cmake --preset default`
   - `cmake --build --preset default`
   - `ctest --preset default`
-  - Result: `5/5 tests passed`
-- CI workflow baseline exists in `.github/workflows/ci.yml`, but first remote GitHub Actions execution is still pending.
-- `M0` is not closed yet because `M0-T03` is still open.
+  - `cmake --build --preset default --target orchard_format_check orchard_lint`
+  - Result: `5/5 tests passed`, `clang-format check passed`, `clang-tidy passed`
+- CI workflow baseline and lint job exist in `.github/workflows/ci.yml`, but first remote GitHub Actions lint execution is still pending.
+- `M0` is locally complete; final CI observation is still pending.
 
 ### Tasks
 
@@ -255,11 +256,12 @@ A task is only `Done` when all apply:
   Verification: Clean configure and build on Windows dev environment.
   Evidence: `CMakeLists.txt`, `CMakePresets.json`, `cmake/OrchardProject.cmake`, and `cmake/OrchardTest.cmake` are in place; `cmake --preset default` and `cmake --build --preset default` passed with the local Conda LLVM toolchain documented in `AGENTS.md`.
 
-- [ ] `M0-T03` Formatting and linting
-  Status: `Planned`
+- [x] `M0-T03` Formatting and linting
+  Status: `Done`
   Depends on: `M0-T02`
   Done when: Formatting and static analysis commands exist and are documented.
-  Verification: CI lint job passes.
+  Verification: Local format and lint targets pass, and a CI lint job is configured for remote verification.
+  Evidence: `.editorconfig`, `.clang-format`, `.clang-tidy`, `tools/dev/orchard-format.ps1`, and `tools/dev/orchard-lint.ps1` are checked in; `orchard_format_check` and `orchard_lint` both passed locally; `.github/workflows/ci.yml` now includes a dedicated `windows-lint` job for the remote verification step.
 
 - [x] `M0-T04` Test harness baseline
   Status: `Done`
@@ -686,6 +688,7 @@ Start here once implementation begins:
 - [x] `NOW-03` Complete `M0-T04` test harness baseline
 - [x] `NOW-04` Complete `M0-T05` fixture manifest and corpus policy
 - [x] `NOW-05` Complete `M0-T06` `orchard-inspect` stub
-- [ ] `NOW-06` Complete `M0-T03` formatting and linting
-- [ ] `NOW-07` Start `M1-T01` block I/O abstraction once `M0-T03` is in place
-- [ ] `NOW-08` Start `M1-T02` GPT and container discovery on top of `M1-T01`
+- [x] `NOW-06` Complete `M0-T03` formatting and linting
+- [ ] `NOW-07` Observe first remote `windows-lint` GitHub Actions run
+- [ ] `NOW-08` Start `M1-T01` block I/O abstraction
+- [ ] `NOW-09` Start `M1-T02` GPT and container discovery on top of `M1-T01`

@@ -6,5 +6,4 @@ namespace orchard::orchardctl {
 
 std::string_view PlaceholderStatus() noexcept;
 
-}  // namespace orchard::orchardctl
-
+} // namespace orchard::orchardctl

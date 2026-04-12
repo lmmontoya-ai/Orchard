@@ -7,6 +7,34 @@ on:
   pull_request:
 
 jobs:
+  windows-lint:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install LLVM tools
+        shell: pwsh
+        run: |
+          choco install llvm --yes --no-progress
+          "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Configure
+        shell: pwsh
+        run: cmake --preset default
+
+      - name: Format check
+        shell: pwsh
+        run: cmake --build --preset default --target orchard_format_check
+
+      - name: Lint
+        shell: pwsh
+        run: cmake --build --preset default --target orchard_lint
+
   windows-baseline:
     runs-on: windows-latest
 
@@ -28,4 +56,3 @@ jobs:
       - name: Test
         shell: pwsh
         run: ctest --preset default
-

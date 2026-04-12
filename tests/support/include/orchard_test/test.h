@@ -10,7 +10,7 @@
 namespace orchard_test {
 
 class Failure : public std::runtime_error {
- public:
+public:
   using std::runtime_error::runtime_error;
 };
 
@@ -47,8 +47,7 @@ inline int RunTests(std::initializer_list<TestCase> test_cases) {
   return 0;
 }
 
-}  // namespace orchard_test
+} // namespace orchard_test
 
-#define ORCHARD_TEST_REQUIRE(expression) \
+#define ORCHARD_TEST_REQUIRE(expression)                                                           \
   ::orchard_test::Require((expression), #expression, __FILE__, __LINE__)
-

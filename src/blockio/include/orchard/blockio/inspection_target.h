@@ -29,5 +29,4 @@ InspectionTargetInfo InspectTargetPath(const std::filesystem::path& path);
 bool LooksLikeRawDevicePath(std::string_view native_path) noexcept;
 std::string_view ToString(TargetKind kind) noexcept;
 
-}  // namespace orchard::blockio
-
+} // namespace orchard::blockio

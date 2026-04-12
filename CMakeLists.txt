@@ -10,6 +10,7 @@ project(
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(ORCHARD_BUILD_TESTS "Build Orchard test targets." ON)
 
@@ -26,3 +27,4 @@ if(BUILD_TESTING AND ORCHARD_BUILD_TESTS)
   add_subdirectory(tests)
 endif()
 
+orchard_add_maintenance_targets()

@@ -8,7 +8,7 @@ namespace {
 constexpr std::string_view kPhysicalDrivePrefix = R"(\\.\PhysicalDrive)";
 constexpr std::string_view kVolumePrefix = R"(\\.\Volume{)";
 
-}  // namespace
+} // namespace
 
 InspectionTargetInfo InspectTargetPath(const std::filesystem::path& path) {
   InspectionTargetInfo info;
@@ -57,20 +57,19 @@ bool LooksLikeRawDevicePath(std::string_view native_path) noexcept {
 
 std::string_view ToString(TargetKind kind) noexcept {
   switch (kind) {
-    case TargetKind::kRegularFile:
-      return "regular_file";
-    case TargetKind::kRawDevice:
-      return "raw_device";
-    case TargetKind::kDirectory:
-      return "directory";
-    case TargetKind::kMissing:
-      return "missing";
-    case TargetKind::kUnknown:
-      return "unknown";
+  case TargetKind::kRegularFile:
+    return "regular_file";
+  case TargetKind::kRawDevice:
+    return "raw_device";
+  case TargetKind::kDirectory:
+    return "directory";
+  case TargetKind::kMissing:
+    return "missing";
+  case TargetKind::kUnknown:
+    return "unknown";
   }
 
   return "unknown";
 }
 
-}  // namespace orchard::blockio
-
+} // namespace orchard::blockio
