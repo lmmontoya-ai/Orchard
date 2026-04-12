@@ -1,6 +1,8 @@
 #include <array>
 #include <vector>
 
+#include "orchard/apfs/btree.h"
+#include "orchard/apfs/object.h"
 #include "orchard/apfs/probe.h"
 #include "orchard_test/test.h"
 
@@ -32,6 +34,10 @@ void ExercisesProbeAcrossRepresentativeInputs() {
 
   for (const auto& sample : samples) {
     (void)orchard::apfs::ProbeContainerMagic(sample);
+    (void)orchard::apfs::ParseObjectHeader(sample);
+    if (sample.size() >= orchard::apfs::kApfsMinimumBlockSize) {
+      (void)orchard::apfs::ParseNode(sample, orchard::apfs::kApfsMinimumBlockSize);
+    }
   }
 
   ORCHARD_TEST_REQUIRE(orchard::apfs::ProbeContainerMagic(samples[2]));

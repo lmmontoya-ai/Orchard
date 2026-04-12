@@ -6,6 +6,7 @@
 #include <string_view>
 #include <vector>
 
+#include "orchard/apfs/format.h"
 #include "orchard/blockio/reader.h"
 
 namespace orchard::apfs {
@@ -16,19 +17,7 @@ enum class LayoutKind {
   kGuidPartitionTable,
 };
 
-enum class CheckpointSource {
-  kMainSuperblock,
-  kCheckpointDescriptorArea,
-};
-
-struct FeatureFlags {
-  std::uint64_t compatible = 0;
-  std::uint64_t readonly_compatible = 0;
-  std::uint64_t incompatible = 0;
-  std::vector<std::string> compatible_names;
-  std::vector<std::string> readonly_compatible_names;
-  std::vector<std::string> incompatible_names;
-};
+enum class CheckpointSource { kMainSuperblock, kCheckpointDescriptorArea };
 
 struct PartitionInfo {
   std::string type_guid;
@@ -71,6 +60,7 @@ struct ContainerInfo {
   std::uint64_t spaceman_oid = 0;
   std::uint64_t omap_oid = 0;
   std::uint64_t reaper_oid = 0;
+  bool volumes_resolved_via_omap = false;
   std::vector<std::uint64_t> volume_object_ids;
   std::vector<VolumeInfo> volumes;
   std::optional<PartitionInfo> partition;

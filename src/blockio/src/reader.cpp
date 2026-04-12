@@ -31,10 +31,16 @@ public:
     return *this;
   }
 
-  ~ScopedHandle() { Reset(INVALID_HANDLE_VALUE); }
+  ~ScopedHandle() {
+    Reset(INVALID_HANDLE_VALUE);
+  }
 
-  [[nodiscard]] HANDLE get() const noexcept { return handle_; }
-  [[nodiscard]] bool valid() const noexcept { return handle_ != nullptr && handle_ != INVALID_HANDLE_VALUE; }
+  [[nodiscard]] HANDLE get() const noexcept {
+    return handle_;
+  }
+  [[nodiscard]] bool valid() const noexcept {
+    return handle_ != nullptr && handle_ != INVALID_HANDLE_VALUE;
+  }
 
   HANDLE Release() noexcept {
     const HANDLE released = handle_;
@@ -53,8 +59,7 @@ private:
   HANDLE handle_ = INVALID_HANDLE_VALUE;
 };
 
-[[nodiscard]] Error MakeError(ErrorCode code,
-                              std::string message,
+[[nodiscard]] Error MakeError(ErrorCode code, std::string message,
                               const std::uint32_t system_code = 0) {
   return Error{
       .code = code,
@@ -63,8 +68,7 @@ private:
   };
 }
 
-[[nodiscard]] Error MakeWin32Error(const ErrorCode code,
-                                   const DWORD system_code,
+[[nodiscard]] Error MakeWin32Error(const ErrorCode code, const DWORD system_code,
                                    const std::string_view message) {
   return MakeError(code, std::string(message), system_code);
 }
@@ -85,25 +89,18 @@ private:
 
 class HandleReader final : public Reader {
 public:
-  HandleReader(ScopedHandle handle,
-               std::filesystem::path path,
-               const TargetKind target_kind,
-               std::optional<std::uint64_t> known_size,
-               std::optional<Error> size_error)
-      : handle_(std::move(handle)),
-        path_(std::move(path)),
-        target_kind_(target_kind),
-        known_size_(known_size),
-        size_error_(std::move(size_error)) {}
+  HandleReader(ScopedHandle handle, std::filesystem::path path, const TargetKind target_kind,
+               std::optional<std::uint64_t> known_size, std::optional<Error> size_error)
+      : handle_(std::move(handle)), path_(std::move(path)), target_kind_(target_kind),
+        known_size_(known_size), size_error_(std::move(size_error)) {}
 
   [[nodiscard]] Result<std::uint64_t> size_bytes() const override {
     if (known_size_.has_value()) {
       return *known_size_;
     }
 
-    return size_error_.value_or(MakeError(
-        ErrorCode::kNotImplemented,
-        "Reader size is not available for this target."));
+    return size_error_.value_or(
+        MakeError(ErrorCode::kNotImplemented, "Reader size is not available for this target."));
   }
 
   [[nodiscard]] Result<std::size_t> ReadAt(const std::uint64_t offset,
@@ -122,11 +119,8 @@ public:
     overlapped.OffsetHigh = static_cast<DWORD>((offset >> 32U) & 0xFFFFFFFFULL);
 
     DWORD bytes_read = 0;
-    const BOOL read_ok = ::ReadFile(handle_.get(),
-                                    buffer.data(),
-                                    static_cast<DWORD>(buffer.size()),
-                                    &bytes_read,
-                                    &overlapped);
+    const BOOL read_ok = ::ReadFile(handle_.get(), buffer.data(), static_cast<DWORD>(buffer.size()),
+                                    &bytes_read, &overlapped);
 
     if (read_ok == FALSE) {
       return MakeWin32Error(ErrorCode::kReadFailed, ::GetLastError(), "ReadAt failed.");
@@ -139,9 +133,13 @@ public:
     return "windows_handle";
   }
 
-  [[nodiscard]] TargetKind target_kind() const noexcept override { return target_kind_; }
+  [[nodiscard]] TargetKind target_kind() const noexcept override {
+    return target_kind_;
+  }
 
-  [[nodiscard]] const std::filesystem::path& path() const noexcept override { return path_; }
+  [[nodiscard]] const std::filesystem::path& path() const noexcept override {
+    return path_;
+  }
 
 private:
   ScopedHandle handle_;
@@ -170,16 +168,21 @@ public:
     const auto available = bytes_.size() - start;
     const auto read_size = std::min(buffer.size(), available);
     std::copy_n(bytes_.begin() + static_cast<std::ptrdiff_t>(start),
-                static_cast<std::ptrdiff_t>(read_size),
-                buffer.begin());
+                static_cast<std::ptrdiff_t>(read_size), buffer.begin());
     return read_size;
   }
 
-  [[nodiscard]] std::string_view backend_name() const noexcept override { return "memory"; }
+  [[nodiscard]] std::string_view backend_name() const noexcept override {
+    return "memory";
+  }
 
-  [[nodiscard]] TargetKind target_kind() const noexcept override { return TargetKind::kRegularFile; }
+  [[nodiscard]] TargetKind target_kind() const noexcept override {
+    return TargetKind::kRegularFile;
+  }
 
-  [[nodiscard]] const std::filesystem::path& path() const noexcept override { return label_; }
+  [[nodiscard]] const std::filesystem::path& path() const noexcept override {
+    return label_;
+  }
 
 private:
   std::vector<std::uint8_t> bytes_;
@@ -190,14 +193,8 @@ private:
   if (target_kind == TargetKind::kRawDevice) {
     GET_LENGTH_INFORMATION disk_length{};
     DWORD bytes_returned = 0;
-    if (::DeviceIoControl(handle,
-                          IOCTL_DISK_GET_LENGTH_INFO,
-                          nullptr,
-                          0,
-                          &disk_length,
-                          sizeof(disk_length),
-                          &bytes_returned,
-                          nullptr) != FALSE) {
+    if (::DeviceIoControl(handle, IOCTL_DISK_GET_LENGTH_INFO, nullptr, 0, &disk_length,
+                          sizeof(disk_length), &bytes_returned, nullptr) != FALSE) {
       return static_cast<std::uint64_t>(disk_length.Length.QuadPart);
     }
 
@@ -208,17 +205,13 @@ private:
       return static_cast<std::uint64_t>(file_size.QuadPart);
     }
 
-    return MakeWin32Error(
-        ErrorCode::kIoctlFailed,
-        ioctl_error,
-        "Failed to query raw-device size via IOCTL_DISK_GET_LENGTH_INFO.");
+    return MakeWin32Error(ErrorCode::kIoctlFailed, ioctl_error,
+                          "Failed to query raw-device size via IOCTL_DISK_GET_LENGTH_INFO.");
   }
 
   LARGE_INTEGER file_size{};
   if (::GetFileSizeEx(handle, &file_size) == FALSE) {
-    return MakeWin32Error(ErrorCode::kOpenFailed,
-                          ::GetLastError(),
-                          "Failed to query file size.");
+    return MakeWin32Error(ErrorCode::kOpenFailed, ::GetLastError(), "Failed to query file size.");
   }
 
   return static_cast<std::uint64_t>(file_size.QuadPart);
@@ -236,8 +229,7 @@ Result<ReaderHandle> OpenReader(const InspectionTargetInfo& target_info) {
     return MakeError(ErrorCode::kNotFound,
                      "Target path does not exist or is not a supported raw-device path.");
   case TargetKind::kDirectory:
-    return MakeError(ErrorCode::kUnsupportedTarget,
-                     "Directories are not valid block I/O targets.");
+    return MakeError(ErrorCode::kUnsupportedTarget, "Directories are not valid block I/O targets.");
   case TargetKind::kUnknown:
     return MakeError(ErrorCode::kUnsupportedTarget,
                      "Target kind is not supported by the block I/O layer.");
@@ -251,18 +243,12 @@ Result<ReaderHandle> OpenReader(const InspectionTargetInfo& target_info) {
   const DWORD creation_disposition = OPEN_EXISTING;
   const DWORD flags_and_attributes = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_RANDOM_ACCESS;
 
-  ScopedHandle handle(::CreateFileW(target_info.path.c_str(),
-                                    desired_access,
-                                    share_mode,
-                                    nullptr,
-                                    creation_disposition,
-                                    flags_and_attributes,
-                                    nullptr));
+  ScopedHandle handle(::CreateFileW(target_info.path.c_str(), desired_access, share_mode, nullptr,
+                                    creation_disposition, flags_and_attributes, nullptr));
 
   if (!handle.valid()) {
     const DWORD system_code = ::GetLastError();
-    return MakeWin32Error(MapOpenErrorCode(system_code),
-                          system_code,
+    return MakeWin32Error(MapOpenErrorCode(system_code), system_code,
                           "Failed to open block I/O target.");
   }
 
@@ -278,30 +264,23 @@ Result<ReaderHandle> OpenReader(const InspectionTargetInfo& target_info) {
     }
   }
 
-  return ReaderHandle(std::make_unique<HandleReader>(
-      std::move(handle),
-      target_info.path,
-      target_info.kind,
-      known_size,
-      size_error));
+  return ReaderHandle(std::make_unique<HandleReader>(std::move(handle), target_info.path,
+                                                     target_info.kind, known_size, size_error));
 }
 
-Result<std::vector<std::uint8_t>> ReadExact(const Reader& reader,
-                                            const std::uint64_t offset,
-                                            const std::size_t size) {
-  std::vector<std::uint8_t> bytes(size);
-  if (size == 0U) {
+Result<std::vector<std::uint8_t>> ReadExact(const Reader& reader, const ReadRequest request) {
+  std::vector<std::uint8_t> bytes(request.size);
+  if (request.size == 0U) {
     return bytes;
   }
 
-  auto read_result = reader.ReadAt(offset, bytes);
+  auto read_result = reader.ReadAt(request.offset, bytes);
   if (!read_result.ok()) {
     return read_result.error();
   }
 
-  if (read_result.value() != size) {
-    return MakeError(ErrorCode::kShortRead,
-                     "ReadAt returned fewer bytes than requested.");
+  if (read_result.value() != request.size) {
+    return MakeError(ErrorCode::kShortRead, "ReadAt returned fewer bytes than requested.");
   }
 
   return bytes;

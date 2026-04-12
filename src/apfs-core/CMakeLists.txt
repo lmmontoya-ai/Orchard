@@ -1,8 +1,12 @@
 add_library(
   orchard_apfs_core
   STATIC
+    src/btree.cpp
     src/discovery.cpp
+    src/format.cpp
     src/inspection.cpp
+    src/object.cpp
+    src/omap.cpp
     src/probe.cpp
 )
 

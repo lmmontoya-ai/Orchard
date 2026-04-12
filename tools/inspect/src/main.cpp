@@ -239,6 +239,8 @@ void PrintContainerObject(const orchard::apfs::ContainerInfo& container,
   std::cout << indent << "\"spaceman_oid\": " << container.spaceman_oid << ",\n";
   std::cout << indent << "\"omap_oid\": " << container.omap_oid << ",\n";
   std::cout << indent << "\"reaper_oid\": " << container.reaper_oid << ",\n";
+  std::cout << indent << "\"volumes_resolved_via_omap\": "
+            << (container.volumes_resolved_via_omap ? "true" : "false") << ",\n";
   std::cout << indent << "\"volume_object_ids\": ";
   PrintObjectIdArray(container.volume_object_ids, std::string(indent) + "  ");
   std::cout << ",\n";

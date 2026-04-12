@@ -297,15 +297,16 @@ A task is only `Done` when all apply:
 ### Review Snapshot
 
 - Review date: `2026-04-12`
-- Locally completed: `M1-T01`, `M1-T02`, `M1-T03`
+- Locally completed: `M1-T01`, `M1-T02`, `M1-T03`, `M1-T04`
 - Latest local verification:
   - `cmake --preset default`
+  - `tests/corpus/generate-sample-fixtures.ps1`
   - `cmake --build --preset default --parallel`
   - `cmake --build --preset default --target orchard_format_check orchard_lint`
   - `ctest --preset default`
   - Result: `7/7 tests passed`, `clang-format check passed`, `clang-tidy passed`
 - Key implementation note:
-  - Volume superblock enumeration is currently a bounded fallback block scan guided by `fs_oid` values until object-map traversal lands in `M1-T04`.
+  - Volume superblocks are now resolved via the container object map; the bounded fallback block scan was removed from the primary discovery path.
 
 ### Tasks
 
@@ -330,11 +331,12 @@ A task is only `Done` when all apply:
   Verification: Golden structure tests.
   Evidence: `src/apfs-core/src/discovery.cpp` parses container and volume superblocks, selects the highest-`xid` checkpoint candidate from the descriptor area, and extracts feature flags and roles; `tests/unit/apfs_tests.cpp` verifies direct-container parsing, GPT discovery, checkpoint selection, and volume metadata; `tools/inspect/src/main.cpp` emits structured JSON for the parsed result.
 
-- [ ] `M1-T04` Object map and B-tree traversal
-  Status: `Planned`
+- [x] `M1-T04` Object map and B-tree traversal
+  Status: `Done`
   Depends on: `M1-T03`
   Done when: Orchard resolves object IDs and walks required APFS tree structures.
   Verification: Golden tree traversal tests and fuzz smoke.
+  Evidence: `src/apfs-core/include/orchard/apfs/format.h`, `object.h`, `btree.h`, and `omap.h` split low-level APFS parsing into dedicated modules; `src/apfs-core/src/object.cpp`, `btree.cpp`, and `omap.cpp` implement typed object parsing, physical block reads, generic B-tree traversal, and omap lookup by `(oid, xid)`; `src/apfs-core/src/discovery.cpp` now resolves `fs_oid` values through the container omap before parsing volume superblocks; `tests/unit/apfs_tests.cpp` covers object-header parsing, leaf/internal node parsing, exact/fallback/deleted omap lookups, and end-to-end discovery; `tests/fuzz/fuzz_smoke.cpp` exercises object-header and node parsing on representative inputs.
 
 - [ ] `M1-T05` Inode, dentry, and path lookup
   Status: `Planned`
@@ -710,4 +712,5 @@ Start here once implementation begins:
 - [x] `NOW-07` Observe first remote `windows-lint` GitHub Actions run
 - [x] `NOW-08` Start `M1-T01` block I/O abstraction
 - [x] `NOW-09` Start `M1-T02` GPT and container discovery on top of `M1-T01`
-- [ ] `NOW-10` Start `M1-T04` object map and B-tree traversal
+- [x] `NOW-10` Start `M1-T04` object map and B-tree traversal
+- [ ] `NOW-11` Start `M1-T05` inode, dentry, and path lookup

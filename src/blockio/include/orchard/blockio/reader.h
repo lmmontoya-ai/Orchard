@@ -25,12 +25,14 @@ public:
 
 using ReaderHandle = std::unique_ptr<Reader>;
 
+struct ReadRequest {
+  std::uint64_t offset = 0;
+  std::size_t size = 0;
+};
+
 Result<ReaderHandle> OpenReader(const std::filesystem::path& path);
 Result<ReaderHandle> OpenReader(const InspectionTargetInfo& target_info);
-Result<std::vector<std::uint8_t>> ReadExact(const Reader& reader,
-                                            std::uint64_t offset,
-                                            std::size_t size);
-ReaderHandle MakeMemoryReader(std::vector<std::uint8_t> bytes,
-                              std::filesystem::path label = {});
+Result<std::vector<std::uint8_t>> ReadExact(const Reader& reader, ReadRequest request);
+ReaderHandle MakeMemoryReader(std::vector<std::uint8_t> bytes, std::filesystem::path label = {});
 
 } // namespace orchard::blockio

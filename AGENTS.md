@@ -107,6 +107,7 @@ Regenerate synthetic sample fixtures:
   - direct APFS container detection via `NXSB`
   - GPT header parsing and APFS partition discovery
   - checkpoint selection by scanning the main superblock plus the checkpoint descriptor area for the highest `xid`
-  - minimal container and volume superblock parsing for feature flags, UUIDs, and volume roles
-- Volume superblock enumeration is intentionally temporary: Orchard uses a bounded fallback block scan keyed by `fs_oid` values until object-map traversal lands in `M1-T04`.
+  - object-header parsing, generic B-tree node parsing, container omap traversal, and omap-backed volume superblock resolution
+- `src/apfs-core` is now split so `discovery.cpp` orchestrates layout detection while low-level parsing lives in `format.cpp`, `object.cpp`, `btree.cpp`, and `omap.cpp`.
+- Synthetic APFS fixtures now include a real omap object plus root/leaf omap B-tree nodes; regenerate them with `tests/corpus/generate-sample-fixtures.ps1` after fixture-layout changes.
 - When collecting verification evidence, do not run `cmake --build` and `ctest` in parallel. Running them concurrently can produce misleading failures against stale executables.

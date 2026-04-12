@@ -32,6 +32,7 @@ set(required_fragments
   "\"block_size\": 4096"
   "\"selected_xid\": 42"
   "\"checkpoint_descriptor_area\""
+  "\"volumes_resolved_via_omap\": true"
   "\"name\": \"${EXPECTED_VOLUME_NAME}\""
 )
 

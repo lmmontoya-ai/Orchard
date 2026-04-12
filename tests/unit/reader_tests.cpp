@@ -25,7 +25,8 @@ void OpensRegularFilesAndReadsFromOffsets() {
   auto reader = std::move(reader_result).value();
   ORCHARD_TEST_REQUIRE(reader->backend_name() == "windows_handle");
 
-  const auto read_result = orchard::blockio::ReadExact(*reader, 2U, 4U);
+  const auto read_result =
+      orchard::blockio::ReadExact(*reader, orchard::blockio::ReadRequest{.offset = 2U, .size = 4U});
   ORCHARD_TEST_REQUIRE(read_result.ok());
   ORCHARD_TEST_REQUIRE(read_result.value().size() == 4U);
   ORCHARD_TEST_REQUIRE(read_result.value()[0] == 0x30U);
@@ -38,7 +39,8 @@ void MemoryReaderSupportsDeterministicReads() {
   std::vector<std::uint8_t> bytes{1U, 2U, 3U, 4U, 5U};
   auto reader = orchard::blockio::MakeMemoryReader(bytes, "memory-fixture");
 
-  const auto read_result = orchard::blockio::ReadExact(*reader, 1U, 3U);
+  const auto read_result =
+      orchard::blockio::ReadExact(*reader, orchard::blockio::ReadRequest{.offset = 1U, .size = 3U});
   ORCHARD_TEST_REQUIRE(read_result.ok());
   ORCHARD_TEST_REQUIRE(read_result.value().size() == 3U);
   ORCHARD_TEST_REQUIRE(read_result.value()[0] == 2U);
@@ -49,7 +51,8 @@ void ReadExactReturnsShortReadForOutOfRangeRequests() {
   auto reader =
       orchard::blockio::MakeMemoryReader(std::vector<std::uint8_t>{1U, 2U, 3U}, "short-read");
 
-  const auto read_result = orchard::blockio::ReadExact(*reader, 2U, 4U);
+  const auto read_result =
+      orchard::blockio::ReadExact(*reader, orchard::blockio::ReadRequest{.offset = 2U, .size = 4U});
   ORCHARD_TEST_REQUIRE(!read_result.ok());
   ORCHARD_TEST_REQUIRE(read_result.error().code == orchard::blockio::ErrorCode::kShortRead);
 }
