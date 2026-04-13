@@ -25,7 +25,8 @@ std::string ComposeChildPath(const std::string_view parent, const std::string_vi
 } // namespace
 
 blockio::Result<std::vector<DirectoryQueryEntry>>
-BuildDirectoryQueryEntries(const orchard::apfs::VolumeContext& volume, const FileNode& directory_node,
+BuildDirectoryQueryEntries(const orchard::apfs::VolumeContext& volume,
+                           const FileNode& directory_node,
                            const std::span<const orchard::apfs::DirectoryEntryRecord> entries) {
   if (directory_node.metadata.kind != orchard::apfs::InodeKind::kDirectory) {
     return orchard::apfs::MakeApfsError(blockio::ErrorCode::kInvalidArgument,

@@ -23,7 +23,8 @@ struct DirectoryQueryRequest {
 };
 
 blockio::Result<std::vector<DirectoryQueryEntry>>
-BuildDirectoryQueryEntries(const orchard::apfs::VolumeContext& volume, const FileNode& directory_node,
+BuildDirectoryQueryEntries(const orchard::apfs::VolumeContext& volume,
+                           const FileNode& directory_node,
                            std::span<const orchard::apfs::DirectoryEntryRecord> entries);
 
 std::vector<DirectoryQueryEntry>
