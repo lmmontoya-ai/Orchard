@@ -20,4 +20,9 @@ orchard_add_cpp_test(
     apfs_tests.cpp
   LIBRARIES
     orchard_apfs_core
+    orchard_fs_winfsp
 )
+
+if(TARGET WinFsp::WinFsp)
+  orchard_copy_runtime_dlls(orchard_unit_apfs)
+endif()

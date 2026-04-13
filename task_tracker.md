@@ -386,13 +386,30 @@ A task is only `Done` when all apply:
 - Explorer can browse and copy files out reliably.
 - No shell crashes or major compatibility regressions on core workflows.
 
+### Review Snapshot
+
+- Review date: `2026-04-13`
+- Locally completed: `M2-T01`
+- Latest local verification:
+  - `cmake --preset default -DORCHARD_ENABLE_WINFSP=ON`
+  - `cmake --build --preset default --parallel`
+  - `cmake --build --preset default --target orchard_format_check`
+  - `cmake --build --preset default --target orchard_lint`
+  - `ctest --preset default --output-on-failure`
+  - `orchard-mount-smoke --target tests/corpus/samples/plain-user-data.img --mountpoint R: --hold-ms 30000`
+  - Result: `9/9 tests passed`, `clang-format check passed`, `clang-tidy passed`, WinFsp drive-letter smoke mount browsed `/` and unmounted cleanly
+- Implementation note:
+  - WinFsp-linked executables now copy `winfsp-x64.dll` beside themselves after build so `ctest` and the smoke tool do not require a manually edited `PATH`.
+  - The validated M2 smoke path uses a drive-letter mount (`R:`). A directory mountpoint attempt failed at `FspFileSystemSetMountPoint` and remains follow-up work outside `M2-T01`.
+
 ### Tasks
 
-- [ ] `M2-T01` WinFsp adapter skeleton
-  Status: `Planned`
+- [x] `M2-T01` WinFsp adapter skeleton
+  Status: `Done`
   Depends on: `M1-T06`
   Done when: Orchard mounts a read-only filesystem stub through WinFsp.
   Verification: Manual mount smoke test.
+  Evidence: `cmake/FindWinFsp.cmake` and `cmake/OrchardProject.cmake` now discover the WinFsp developer SDK/runtime and copy `winfsp-x64.dll` into WinFsp-linked output directories; `src/fs-winfsp/` now contains the real adapter split across `mount.cpp`, `filesystem.cpp`, `path_bridge.cpp`, and `file_info.cpp`; `tools/mount-smoke/src/main.cpp` mounts a selected APFS volume and supports timed clean shutdown with `--hold-ms`; `tests/unit/apfs_tests.cpp` covers path bridging and mounted-volume opening/policy gating; the local smoke run mounted `tests/corpus/samples/plain-user-data.img` at `R:`, browsed `docs`, `alpha.txt`, `compressed.txt`, and `holes.bin`, read `alpha.txt`, and observed clean unmount when the timed hold expired.
 
 - [ ] `M2-T02` File and directory query mapping
   Status: `Planned`
@@ -684,10 +701,11 @@ These block v1 release until cleared:
 
 ## Open Design Spikes
 
-- [ ] `SPIKE-01` WinFsp mount shape and lifecycle details
-  Status: `Planned`
+- [x] `SPIKE-01` WinFsp mount shape and lifecycle details
+  Status: `Done`
   Needed by: `M2-T01`
   Done when: Mount architecture document is checked in and adopted.
+  Evidence: The adopted shape is now reflected in the implemented `src/fs-winfsp` split (`mount`, `filesystem`, `path_bridge`, `file_info`) and the `M2-T01` tracker evidence; the runtime lifecycle is handled by `MountedVolume` plus RAII `MountSession` ownership, and the smoke tool exercises that lifecycle directly.
 
 - [ ] `SPIKE-02` Snapshot policy for v1 write eligibility
   Status: `Planned`
@@ -724,4 +742,5 @@ Start here once implementation begins:
 - [x] `NOW-09` Start `M1-T02` GPT and container discovery on top of `M1-T01`
 - [x] `NOW-10` Start `M1-T04` object map and B-tree traversal
 - [x] `NOW-11` Start `M1-T05` inode, dentry, and path lookup
-- [ ] `NOW-12` Start `M2-T01` WinFsp read-only adapter skeleton on top of the offline reader core
+- [x] `NOW-12` Start `M2-T01` WinFsp read-only adapter skeleton on top of the offline reader core
+- [ ] `NOW-13` Start `M2-T02` file and directory query mapping hardening on top of the mounted adapter

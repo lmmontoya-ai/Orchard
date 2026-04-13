@@ -18,6 +18,8 @@
 #include "orchard/apfs/volume.h"
 #include "orchard/blockio/inspection_target.h"
 #include "orchard/blockio/reader.h"
+#include "orchard/fs_winfsp/mount.h"
+#include "orchard/fs_winfsp/path_bridge.h"
 #include "orchard_test/test.h"
 
 namespace {
@@ -891,6 +893,85 @@ void InspectTargetUsesRealReaderPathAndEnrichesOutput() {
   std::filesystem::remove(temp_path);
 }
 
+void WinFspPathBridgeNormalizesPaths() {
+  const auto root_result = orchard::fs_winfsp::NormalizeWindowsPath(L"\\");
+  ORCHARD_TEST_REQUIRE(root_result.ok());
+  ORCHARD_TEST_REQUIRE(root_result.value() == "/");
+
+  const auto nested_result = orchard::fs_winfsp::NormalizeWindowsPath(L"\\docs\\empty.txt");
+  ORCHARD_TEST_REQUIRE(nested_result.ok());
+  ORCHARD_TEST_REQUIRE(nested_result.value() == "/docs/empty.txt");
+
+  const auto windows_path_result = orchard::fs_winfsp::OrchardPathToWindowsPath("/docs/empty.txt");
+  ORCHARD_TEST_REQUIRE(windows_path_result.ok());
+  ORCHARD_TEST_REQUIRE(windows_path_result.value() == L"\\docs\\empty.txt");
+
+  const auto stream_result = orchard::fs_winfsp::NormalizeWindowsPath(L"\\bad:name");
+  ORCHARD_TEST_REQUIRE(!stream_result.ok());
+  ORCHARD_TEST_REQUIRE(stream_result.error().code == orchard::blockio::ErrorCode::kNotImplemented);
+}
+
+void WinFspMountedVolumeOpensSyntheticFixture() {
+  const auto temp_path = std::filesystem::temp_directory_path() / "orchard_apfs_mount.img";
+  const auto bytes = MakeDirectFixture();
+
+  {
+    std::ofstream output(temp_path, std::ios::binary);
+    output.write(reinterpret_cast<const char*>(bytes.data()),
+                 static_cast<std::streamsize>(bytes.size()));
+  }
+
+  orchard::fs_winfsp::MountConfig config;
+  config.target_path = temp_path;
+  config.mount_point = L"R:";
+
+  const auto mounted_volume_result = orchard::fs_winfsp::OpenMountedVolume(config);
+  ORCHARD_TEST_REQUIRE(mounted_volume_result.ok());
+  ORCHARD_TEST_REQUIRE(mounted_volume_result.value()->volume_info().name == "Orchard Data");
+
+  const auto root_result = mounted_volume_result.value()->ResolveFileNode("/");
+  ORCHARD_TEST_REQUIRE(root_result.ok());
+  ORCHARD_TEST_REQUIRE(root_result.value().metadata.kind == orchard::apfs::InodeKind::kDirectory);
+
+  const auto alpha_result = mounted_volume_result.value()->ResolveFileNode("/alpha.txt");
+  ORCHARD_TEST_REQUIRE(alpha_result.ok());
+  ORCHARD_TEST_REQUIRE(alpha_result.value().metadata.kind ==
+                       orchard::apfs::InodeKind::kRegularFile);
+
+  orchard::apfs::FileReadRequest request;
+  request.inode_id = alpha_result.value().inode_id;
+  request.offset = 0U;
+  request.size = 8U;
+  const auto bytes_result = mounted_volume_result.value()->ReadFileRange(request);
+  ORCHARD_TEST_REQUIRE(bytes_result.ok());
+  ORCHARD_TEST_REQUIRE(bytes_result.value().size() == 8U);
+
+  std::filesystem::remove(temp_path);
+}
+
+void WinFspMountedVolumeRejectsReadWritePolicyWhenDowngradeDisabled() {
+  const auto temp_path = std::filesystem::temp_directory_path() / "orchard_apfs_mount_policy.img";
+  const auto bytes = MakeDirectFixture();
+
+  {
+    std::ofstream output(temp_path, std::ios::binary);
+    output.write(reinterpret_cast<const char*>(bytes.data()),
+                 static_cast<std::streamsize>(bytes.size()));
+  }
+
+  orchard::fs_winfsp::MountConfig config;
+  config.target_path = temp_path;
+  config.mount_point = L"S:";
+  config.allow_downgrade_from_readwrite = false;
+
+  const auto mounted_volume_result = orchard::fs_winfsp::OpenMountedVolume(config);
+  ORCHARD_TEST_REQUIRE(!mounted_volume_result.ok());
+  ORCHARD_TEST_REQUIRE(mounted_volume_result.error().code ==
+                       orchard::blockio::ErrorCode::kUnsupportedTarget);
+
+  std::filesystem::remove(temp_path);
+}
+
 } // namespace
 
 int main() {
@@ -908,5 +989,9 @@ int main() {
       {"PolicyEngineClassifiesSyntheticVolumes", &PolicyEngineClassifiesSyntheticVolumes},
       {"InspectTargetUsesRealReaderPathAndEnrichesOutput",
        &InspectTargetUsesRealReaderPathAndEnrichesOutput},
+      {"WinFspPathBridgeNormalizesPaths", &WinFspPathBridgeNormalizesPaths},
+      {"WinFspMountedVolumeOpensSyntheticFixture", &WinFspMountedVolumeOpensSyntheticFixture},
+      {"WinFspMountedVolumeRejectsReadWritePolicyWhenDowngradeDisabled",
+       &WinFspMountedVolumeRejectsReadWritePolicyWhenDowngradeDisabled},
   });
 }

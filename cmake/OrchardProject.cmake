@@ -21,6 +21,17 @@ function(orchard_configure_target target_name)
   endif()
 endfunction()
 
+function(orchard_copy_runtime_dlls target_name)
+  add_custom_command(
+    TARGET "${target_name}"
+    POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+      $<TARGET_RUNTIME_DLLS:${target_name}>
+      $<TARGET_FILE_DIR:${target_name}>
+    COMMAND_EXPAND_LISTS
+  )
+endfunction()
+
 function(orchard_add_maintenance_targets)
   find_program(ORCHARD_POWERSHELL NAMES pwsh powershell REQUIRED)
 

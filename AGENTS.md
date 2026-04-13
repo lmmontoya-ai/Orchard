@@ -119,5 +119,38 @@ Regenerate synthetic sample fixtures:
   - inline `decmpfs_uncompressed_attribute` reads
   - policy outcomes for writable, snapshot read-only, and sealed reject cases
 - `orchard-inspect` now enriches each discovered volume with root-directory samples and up to two root-file probes. The current probes are intended for offline inspection and test observability, not for final UX design.
-- `orchard_lint` now runs across 18 translation units and can take several minutes locally; prefer running it separately from `ctest`.
+- `orchard_lint` now runs across 25 translation units and can take several minutes locally; prefer running it separately from `ctest`.
 - When collecting verification evidence, do not run `cmake --build` and `ctest` in parallel. Running them concurrently can produce misleading failures against stale executables.
+
+## M2 notes
+
+- `ORCHARD_ENABLE_WINFSP` now accepts `AUTO`, `ON`, or `OFF`. Use `ON` when validating the WinFsp adapter locally.
+- The `WinFsp` runtime installed via `winget install WinFsp.WinFsp` was not sufficient for local developer builds on this machine because it did not expose headers and import libraries under `C:\Program Files (x86)\WinFsp`. The working local developer SDK came from extracting the official MSI into:
+  - `C:\Users\luism\AppData\Local\Temp\winfsp-sdk\DYNAMIC`
+- For WinFsp-enabled configure/build/test runs on this machine, set:
+
+```powershell
+$env:WINFSP_ROOT_DIR = "$env:TEMP\winfsp-sdk\DYNAMIC"
+cmake --preset default -DORCHARD_ENABLE_WINFSP=ON
+cmake --build --preset default --parallel
+ctest --preset default --output-on-failure
+```
+
+- `FindWinFsp.cmake` now discovers the WinFsp runtime DLL in addition to headers/import libraries, and WinFsp-linked executables copy `winfsp-x64.dll` beside themselves after build. This fixed the local `0xc0000135` / `winfsp-x64.dll was not found` test failure.
+- The validated local smoke path for `M2-T01` is a drive-letter mount, not a directory mountpoint. A mount to `R:` worked; a mount to `%TEMP%\orchard-m2-smoke` failed at `FspFileSystemSetMountPoint` and needs follow-up in a later M2 task.
+- `tools/mount-smoke/src/main.cpp` now supports `--hold-ms <milliseconds>` so a local smoke run can mount, stay alive long enough for inspection, and then unmount cleanly without killing the process.
+- Local `M2-T01` smoke verification used:
+
+```powershell
+$env:PATH = "C:\Users\luism\AppData\Roaming\Python\Python311\Scripts;C:\Users\luism\miniconda3\Library\bin;C:\Users\luism\miniconda3\Library\x86_64-w64-mingw32\bin;$env:PATH"
+$env:WINFSP_ROOT_DIR = "$env:TEMP\winfsp-sdk\DYNAMIC"
+.\build\default\tools\mount-smoke\orchard-mount-smoke.exe --target .\tests\corpus\samples\plain-user-data.img --mountpoint R: --hold-ms 30000
+```
+
+- The successful smoke browse observed these root entries on `R:\`:
+  - `docs`
+  - `alpha.txt`
+  - `compressed.txt`
+  - `holes.bin`
+- `alpha.txt` read successfully during the smoke run with bytes:
+  - `48-65-6C-6C-6F-20-4F-72-63-68-61-72-64-0A`
