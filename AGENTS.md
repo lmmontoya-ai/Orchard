@@ -151,6 +151,12 @@ ctest --preset default --output-on-failure
   - marker/resume filtering
   - simple wildcard pattern filtering
   - deterministic output order inherited from the APFS directory listing
+- `M2-T03` added a larger synthetic shell-stress volume at `tests/corpus/samples/explorer-large.img`. It uses a multi-leaf filesystem tree and includes:
+  - a 181-entry directory at `/bulk items`
+  - a nested file at `/bulk items/Nested Folder/deep-note.txt`
+  - a larger regular file at `/copy-source.bin` for copy-out validation
+- `src/fs-winfsp/src/directory_query.cpp` now also exposes `PaginateDirectoryQueryEntries`, which is used by the WinFsp callback layer to make buffer-bounded directory enumeration deterministic under larger listings.
+- `src/fs-winfsp/src/mount.cpp` now caches open nodes by the canonical path returned from APFS lookup, not only by the caller-supplied path spelling. This matters for repeated case-insensitive opens such as `/alpha.txt` followed by `/ALPHA.TXT`.
 - Local `M2-T01` smoke verification used:
 
 ```powershell
@@ -172,3 +178,19 @@ $env:WINFSP_ROOT_DIR = "$env:TEMP\winfsp-sdk\DYNAMIC"
   - `(Get-Item R:\alpha.txt).Length` returned `14`
   - `(Get-Item R:\compressed.txt).Length` returned `19`
   - `[System.IO.File]::ReadAllText("R:\alpha.txt")` returned `Hello Orchard` plus trailing newline
+- Local `M2-T03` automated shell smoke is now in `tools/dev/orchard-winfsp-shell-smoke.ps1`. On this machine it passed with:
+
+```powershell
+$env:PATH = "C:\Users\luism\AppData\Roaming\Python\Python311\Scripts;C:\Users\luism\miniconda3\Library\bin;C:\Users\luism\miniconda3\Library\x86_64-w64-mingw32\bin;$env:PATH"
+$env:WINFSP_ROOT_DIR = "$env:TEMP\winfsp-sdk\DYNAMIC"
+.\tools\dev\orchard-winfsp-shell-smoke.ps1
+```
+
+- The automated `M2-T03` smoke observed:
+  - repeated root listings on the mounted drive
+  - repeated listing of `/bulk items` with `181` entries
+  - preview reads for `preview.txt` and `bulk items\Nested Folder\deep-note.txt`
+  - `Copy-Item` + hash equality for `copy-source.bin`
+  - clean timed unmount after validation
+- The PowerShell shell view listed `bulk items` before `alpha.txt` on the mounted root. That is a shell-ordering observation, not an APFS-directory sort guarantee; do not use shell-visible ordering as the only correctness oracle.
+- On `2026-04-13`, manual Explorer validation was observed on this machine: the mounted volume appeared in File Explorer and `copy-source.bin` was copied successfully to `C:\Users\luism\OneDrive\Escritorio`. That closes the remaining manual-evidence gap for `M2-T03`.

@@ -22,6 +22,17 @@ struct DirectoryQueryRequest {
   bool case_insensitive = false;
 };
 
+struct DirectoryQueryPage {
+  std::vector<DirectoryQueryEntry> entries;
+  std::optional<std::wstring> last_emitted_name;
+  bool truncated = false;
+};
+
+struct DirectoryQueryPaginationConfig {
+  std::size_t max_bytes = 0;
+  std::size_t base_entry_size = 0;
+};
+
 blockio::Result<std::vector<DirectoryQueryEntry>>
 BuildDirectoryQueryEntries(const orchard::apfs::VolumeContext& volume,
                            const FileNode& directory_node,
@@ -30,5 +41,9 @@ BuildDirectoryQueryEntries(const orchard::apfs::VolumeContext& volume,
 std::vector<DirectoryQueryEntry>
 FilterDirectoryQueryEntries(std::span<const DirectoryQueryEntry> entries,
                             const DirectoryQueryRequest& request);
+std::size_t EstimateDirectoryQueryEntryBytes(const DirectoryQueryEntry& entry,
+                                             std::size_t base_entry_size) noexcept;
+DirectoryQueryPage PaginateDirectoryQueryEntries(std::span<const DirectoryQueryEntry> entries,
+                                                 const DirectoryQueryPaginationConfig& config);
 
 } // namespace orchard::fs_winfsp

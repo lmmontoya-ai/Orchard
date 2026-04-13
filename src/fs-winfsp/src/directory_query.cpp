@@ -91,4 +91,36 @@ FilterDirectoryQueryEntries(const std::span<const DirectoryQueryEntry> entries,
   return filtered;
 }
 
+std::size_t EstimateDirectoryQueryEntryBytes(const DirectoryQueryEntry& entry,
+                                             const std::size_t base_entry_size) noexcept {
+  return base_entry_size + (entry.file_name.size() * sizeof(wchar_t));
+}
+
+DirectoryQueryPage PaginateDirectoryQueryEntries(const std::span<const DirectoryQueryEntry> entries,
+                                                 const DirectoryQueryPaginationConfig& config) {
+  DirectoryQueryPage page;
+  if (entries.empty()) {
+    return page;
+  }
+
+  std::size_t used_bytes = 0U;
+  for (const auto& entry : entries) {
+    const auto entry_bytes = EstimateDirectoryQueryEntryBytes(entry, config.base_entry_size);
+    if (entry_bytes > config.max_bytes) {
+      page.truncated = true;
+      return page;
+    }
+    if (!page.entries.empty() && used_bytes + entry_bytes > config.max_bytes) {
+      page.truncated = true;
+      return page;
+    }
+
+    used_bytes += entry_bytes;
+    page.entries.push_back(entry);
+    page.last_emitted_name = page.entries.back().file_name;
+  }
+
+  return page;
+}
+
 } // namespace orchard::fs_winfsp

@@ -219,6 +219,82 @@ def variable_root_leaf(buf, base, oid, xid, subtype, records):
     w64(buf, footer + 0x18, len(records))
     w64(buf, footer + 0x20, 1)
 
+def variable_leaf(buf, base, oid, xid, subtype, records):
+    table_len = len(records) * 8
+    key_start = base + 0x38 + table_len
+    value_end = base + APFS_BLOCK_SIZE
+    object_header(buf, base, oid, xid, OBJ_TYPE_BTREE_NODE, subtype)
+    w16(buf, base + 0x20, BTN_LEAF)
+    w32(buf, base + 0x24, len(records))
+    w16(buf, base + 0x2A, table_len)
+    w16(buf, base + 0x30, BTN_OFF_INVALID)
+    w16(buf, base + 0x34, BTN_OFF_INVALID)
+    key_off = 0
+    value_off = 0
+    for i, (key, value) in enumerate(records):
+        toc = base + 0x38 + i * 8
+        value_off += len(value)
+        w16(buf, toc + 0x00, key_off)
+        w16(buf, toc + 0x02, len(key))
+        w16(buf, toc + 0x04, value_off)
+        w16(buf, toc + 0x06, len(value))
+        wbytes(buf, key_start + key_off, key)
+        wbytes(buf, value_end - value_off, value)
+        key_off += len(key)
+
+def variable_root_internal(buf, base, oid, xid, subtype, children, key_count, node_count):
+    table_len = len(children) * 8
+    key_start = base + 0x38 + table_len
+    value_end = base + APFS_BLOCK_SIZE - BTREE_INFO_SIZE
+    object_header(buf, base, oid, xid, OBJ_TYPE_BTREE_NODE, subtype)
+    w16(buf, base + 0x20, BTN_ROOT)
+    w16(buf, base + 0x22, 1)
+    w32(buf, base + 0x24, len(children))
+    w16(buf, base + 0x2A, table_len)
+    w16(buf, base + 0x30, BTN_OFF_INVALID)
+    w16(buf, base + 0x34, BTN_OFF_INVALID)
+    key_off = 0
+    value_off = 0
+    longest_key = 0
+    for i, (key, child_block) in enumerate(children):
+        value = struct.pack("<Q", child_block)
+        toc = base + 0x38 + i * 8
+        value_off += len(value)
+        w16(buf, toc + 0x00, key_off)
+        w16(buf, toc + 0x02, len(key))
+        w16(buf, toc + 0x04, value_off)
+        w16(buf, toc + 0x06, len(value))
+        wbytes(buf, key_start + key_off, key)
+        wbytes(buf, value_end - value_off, value)
+        key_off += len(key)
+        longest_key = max(longest_key, len(key))
+    footer = base + APFS_BLOCK_SIZE - BTREE_INFO_SIZE
+    w32(buf, footer + 0x04, APFS_BLOCK_SIZE)
+    w32(buf, footer + 0x10, longest_key)
+    w32(buf, footer + 0x14, 8)
+    w64(buf, footer + 0x18, key_count)
+    w64(buf, footer + 0x20, node_count)
+
+def variable_leaf_fits(records):
+    table_len = len(records) * 8
+    key_bytes = sum(len(key) for key, _ in records)
+    value_bytes = sum(len(value) for _, value in records)
+    return 0x38 + table_len + key_bytes + value_bytes <= APFS_BLOCK_SIZE
+
+def split_variable_records(records):
+    chunks = []
+    current = []
+    for record in records:
+        trial = current + [record]
+        if current and not variable_leaf_fits(trial):
+            chunks.append(current)
+            current = [record]
+            continue
+        current = trial
+    if current:
+        chunks.append(current)
+    return chunks
+
 def volume_superblock(buf, base, xid, incompat, role, name):
     object_header(buf, base, VOLUME_OBJECT_ID, xid, OBJ_TYPE_FS, 0)
     wa(buf, base + 0x20, "APSB")
@@ -301,10 +377,117 @@ def build_gpt():
     buf[first_lba * logical:first_lba * logical + len(container)] = container
     return bytes(buf)
 
+def make_copy_chunk(index):
+    header = f"ORCHARD-COPY-BLOCK-{index:02d}\n".encode("ascii")
+    repeated = (header * ((APFS_BLOCK_SIZE // len(header)) + 1))[:APFS_BLOCK_SIZE]
+    return repeated
+
+def build_explorer_stress():
+    block_count = 64
+    fs_tree_root_block = 9
+    fs_tree_leaf_start_block = 10
+    copy_data_blocks = [32, 33, 34, 35]
+    preview_data_block = 36
+    deep_note_data_block = 37
+    alpha_data_blocks = [38, 39]
+
+    bulk_dir_inode_id = 70
+    nested_dir_inode_id = 71
+    preview_inode_id = 72
+    copy_inode_id = 73
+    deep_note_inode_id = 74
+    bulk_file_inode_start = 1000
+    bulk_file_count = 180
+
+    preview_text = b"Explorer preview\n"
+    deep_note_text = b"Explorer deep note\n"
+    copy_chunks = [make_copy_chunk(index) for index in range(len(copy_data_blocks))]
+
+    def bulk_name(index):
+        variants = (
+            f"entry {index:03d}.txt",
+            f"MixCase {index:03d}.TXT",
+            f"space name {index:03d}.log",
+            f"Zeta{index:03d}.dat",
+        )
+        return variants[index % len(variants)]
+
+    records = [
+        (inode_key(ROOT_INODE_ID), inode_value(ROOT_INODE_ID, 0, 0, 0, 4, 0x4000)),
+        (inode_key(ALPHA_INODE_ID), inode_value(ROOT_INODE_ID, len(ALPHA_EXTENT1)+len(ALPHA_EXTENT2), len(ALPHA_EXTENT1)+len(ALPHA_EXTENT2), 0, 0, 0x8000)),
+        (inode_key(bulk_dir_inode_id), inode_value(ROOT_INODE_ID, 0, 0, 0, bulk_file_count + 1, 0x4000)),
+        (inode_key(nested_dir_inode_id), inode_value(bulk_dir_inode_id, 0, 0, 0, 1, 0x4000)),
+        (inode_key(preview_inode_id), inode_value(ROOT_INODE_ID, len(preview_text), len(preview_text), 0, 0, 0x8000)),
+        (inode_key(copy_inode_id), inode_value(ROOT_INODE_ID, len(copy_chunks) * APFS_BLOCK_SIZE, len(copy_chunks) * APFS_BLOCK_SIZE, 0, 0, 0x8000)),
+        (inode_key(deep_note_inode_id), inode_value(nested_dir_inode_id, len(deep_note_text), len(deep_note_text), 0, 0, 0x8000)),
+        (named_key(ROOT_INODE_ID, FS_TYPE_DIR_REC, "alpha.txt"), dir_value(ALPHA_INODE_ID)),
+        (named_key(ROOT_INODE_ID, FS_TYPE_DIR_REC, "bulk items"), dir_value(bulk_dir_inode_id)),
+        (named_key(ROOT_INODE_ID, FS_TYPE_DIR_REC, "copy-source.bin"), dir_value(copy_inode_id)),
+        (named_key(ROOT_INODE_ID, FS_TYPE_DIR_REC, "preview.txt"), dir_value(preview_inode_id)),
+        (named_key(bulk_dir_inode_id, FS_TYPE_DIR_REC, "Nested Folder"), dir_value(nested_dir_inode_id)),
+        (named_key(nested_dir_inode_id, FS_TYPE_DIR_REC, "deep-note.txt"), dir_value(deep_note_inode_id)),
+        (extent_key(ALPHA_INODE_ID, 0), extent_value(len(ALPHA_EXTENT1), alpha_data_blocks[0])),
+        (extent_key(ALPHA_INODE_ID, len(ALPHA_EXTENT1)), extent_value(len(ALPHA_EXTENT2), alpha_data_blocks[1])),
+        (extent_key(preview_inode_id, 0), extent_value(len(preview_text), preview_data_block)),
+        (extent_key(deep_note_inode_id, 0), extent_value(len(deep_note_text), deep_note_data_block)),
+    ]
+
+    for index, data_block in enumerate(copy_data_blocks):
+        records.append((extent_key(copy_inode_id, index * APFS_BLOCK_SIZE),
+                        extent_value(APFS_BLOCK_SIZE, data_block)))
+
+    for index in range(bulk_file_count):
+        inode_id = bulk_file_inode_start + index
+        records.append((inode_key(inode_id), inode_value(bulk_dir_inode_id, 0, 0, 0, 0, 0x8000)))
+        records.append((named_key(bulk_dir_inode_id, FS_TYPE_DIR_REC, bulk_name(index)),
+                        dir_value(inode_id)))
+
+    sorted_records = sorted(records, key=lambda record: record[0])
+    leaf_chunks = split_variable_records(sorted_records)
+    if len(leaf_chunks) > (copy_data_blocks[0] - fs_tree_leaf_start_block):
+        raise RuntimeError("Explorer stress fixture exceeded the reserved metadata leaf range.")
+
+    buf = bytearray(APFS_BLOCK_SIZE * block_count)
+    nxsb(buf, 0, 1)
+    nxsb(buf, APFS_BLOCK_SIZE, CURRENT_CHECKPOINT_XID)
+    omap_sb(buf, APFS_BLOCK_SIZE * CONTAINER_OMAP_OBJECT_BLOCK, CONTAINER_OMAP_OBJECT_BLOCK, CURRENT_CHECKPOINT_XID, CONTAINER_OMAP_ROOT_BLOCK)
+    omap_root(buf, APFS_BLOCK_SIZE * CONTAINER_OMAP_ROOT_BLOCK, CONTAINER_OMAP_ROOT_BLOCK, CURRENT_CHECKPOINT_XID, VOLUME_OBJECT_ID, 20, CONTAINER_OMAP_LEAF_BLOCK)
+    omap_leaf(buf, APFS_BLOCK_SIZE * CONTAINER_OMAP_LEAF_BLOCK, CONTAINER_OMAP_LEAF_BLOCK, CURRENT_CHECKPOINT_XID, [
+        (VOLUME_OBJECT_ID, 20, 0, LEGACY_VOLUME_BLOCK),
+        (VOLUME_OBJECT_ID, CURRENT_CHECKPOINT_XID, 0, CURRENT_VOLUME_BLOCK),
+        (VOLUME_OMAP_OBJECT_ID, CURRENT_CHECKPOINT_XID, 0, VOLUME_OMAP_BLOCK),
+    ])
+    volume_superblock(buf, APFS_BLOCK_SIZE * LEGACY_VOLUME_BLOCK, 20, VOL_INCOMPAT_CASE_INSENSITIVE, VOL_ROLE_DATA, "Legacy Data")
+    volume_superblock(buf, APFS_BLOCK_SIZE * CURRENT_VOLUME_BLOCK, CURRENT_CHECKPOINT_XID, VOL_INCOMPAT_CASE_INSENSITIVE, VOL_ROLE_DATA, "Explorer Stress")
+    omap_sb(buf, APFS_BLOCK_SIZE * VOLUME_OMAP_BLOCK, VOLUME_OMAP_OBJECT_ID, CURRENT_CHECKPOINT_XID, VOLUME_OMAP_ROOT_BLOCK)
+    omap_leaf(buf, APFS_BLOCK_SIZE * VOLUME_OMAP_ROOT_BLOCK, VOLUME_OMAP_ROOT_BLOCK, CURRENT_CHECKPOINT_XID, [(FS_TREE_OBJECT_ID, CURRENT_CHECKPOINT_XID, 0, fs_tree_root_block)], root=True)
+
+    child_records = []
+    for index, chunk in enumerate(leaf_chunks):
+        leaf_block = fs_tree_leaf_start_block + index
+        leaf_oid = FS_TREE_OBJECT_ID + index + 1
+        variable_leaf(buf, APFS_BLOCK_SIZE * leaf_block, leaf_oid, CURRENT_CHECKPOINT_XID, OBJ_TYPE_FS, chunk)
+        child_records.append((chunk[0][0], leaf_block))
+
+    if len(child_records) == 1:
+        variable_root_leaf(buf, APFS_BLOCK_SIZE * fs_tree_root_block, FS_TREE_OBJECT_ID, CURRENT_CHECKPOINT_XID, OBJ_TYPE_FS, leaf_chunks[0])
+    else:
+        variable_root_internal(buf, APFS_BLOCK_SIZE * fs_tree_root_block, FS_TREE_OBJECT_ID, CURRENT_CHECKPOINT_XID, OBJ_TYPE_FS, child_records, len(sorted_records), 1 + len(child_records))
+
+    wa(buf, APFS_BLOCK_SIZE * alpha_data_blocks[0], ALPHA_EXTENT1)
+    wa(buf, APFS_BLOCK_SIZE * alpha_data_blocks[1], ALPHA_EXTENT2)
+    wa(buf, APFS_BLOCK_SIZE * preview_data_block, preview_text)
+    wa(buf, APFS_BLOCK_SIZE * deep_note_data_block, deep_note_text)
+    for block, chunk in zip(copy_data_blocks, copy_chunks):
+        wbytes(buf, APFS_BLOCK_SIZE * block, chunk)
+
+    return bytes(buf)
+
 (samples_dir / "plain-user-data.img").write_bytes(build_direct())
 (samples_dir / "gpt-user-data.img").write_bytes(build_gpt())
 (samples_dir / "snapshot-volume.img").write_bytes(build_direct(volume_name="Snapshot Data", incompat=VOL_INCOMPAT_CASE_INSENSITIVE | VOL_INCOMPAT_DATALLESS_SNAPS))
 (samples_dir / "sealed-system.img").write_bytes(build_direct(volume_name="System", incompat=VOL_INCOMPAT_CASE_INSENSITIVE | VOL_INCOMPAT_SEALED, role=VOL_ROLE_SYSTEM))
+(samples_dir / "explorer-large.img").write_bytes(build_explorer_stress())
 '@
 
 $python | python - $samplesDir

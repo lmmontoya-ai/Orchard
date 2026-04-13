@@ -408,6 +408,7 @@ A task is only `Done` when all apply:
   - WinFsp-linked executables now copy `winfsp-x64.dll` beside themselves after build so `ctest` and the smoke tool do not require a manually edited `PATH`.
   - The validated M2 smoke path uses a drive-letter mount (`R:`). A directory mountpoint attempt failed at `FspFileSystemSetMountPoint` and remains follow-up work outside `M2-T01`.
   - `M2-T02` hardened query mapping by expanding APFS-side metadata, centralizing APFS-to-Windows file-info translation, making path normalization reject unsupported Windows syntax explicitly, and extracting deterministic directory query filtering into a dedicated helper.
+- `M2-T03` has automated shell-stress coverage in place, including a large-directory synthetic fixture, WinFsp-side directory pagination helpers, and a dedicated PowerShell smoke script. On `2026-04-13`, manual Explorer validation was also observed: the mounted volume appeared in File Explorer and `copy-source.bin` was copied successfully to `C:\Users\luism\OneDrive\Escritorio`.
 
 ### Tasks
 
@@ -425,11 +426,12 @@ A task is only `Done` when all apply:
   Verification: Integration tests and Explorer browsing tests.
   Evidence: `src/apfs-core/include/orchard/apfs/fs_records.h` and `file_read.h` now expose inode timestamps, allocated size, link count, mode, child count, and internal flags from the APFS reader core; `src/fs-winfsp/src/file_info.cpp` is now the single APFS-to-Windows metadata mapping layer; `src/fs-winfsp/src/path_bridge.cpp` normalizes repeated separators, resolves `.` and `..`, preserves matched case-insensitive names, and rejects stream syntax plus unsupported characters; `src/fs-winfsp/src/directory_query.cpp` centralizes deterministic directory-entry building, marker handling, and wildcard filtering; `tests/unit/apfs_tests.cpp` now covers metadata mapping, deterministic directory filtering, path normalization reject cases, and stable open-node identity reuse; local smoke verification against `plain-user-data.img` observed stable repeated root listings (`docs,alpha.txt,compressed.txt,holes.bin`), nested listing (`empty.txt,note.txt`), correct file lengths (`alpha.txt` = `14`, `compressed.txt` = `19`), successful file read (`Hello Orchard\n`), and clean timed unmount.
 
-- [ ] `M2-T03` Read-path Explorer compatibility
-  Status: `Planned`
+- [x] `M2-T03` Read-path Explorer compatibility
+  Status: `Done`
   Depends on: `M2-T02`
   Done when: Open, preview, copy-out, and large-directory enumeration work in Explorer.
   Verification: Manual and automated shell smoke tests.
+  Evidence: `tests/corpus/generate-sample-fixtures.ps1` now emits `tests/corpus/samples/explorer-large.img`, a synthetic stress volume with a multi-leaf filesystem tree, a 181-entry directory, nested subdirectory content, and a larger regular file for copy-out; `tests/corpus/manifests/sample-fixtures.json` and `tests/integration/CMakeLists.txt` now include the stress fixture and inspect validation; `src/fs-winfsp/src/directory_query.cpp` now exposes deterministic paging through `PaginateDirectoryQueryEntries`, and `src/fs-winfsp/src/filesystem.cpp` uses that paging helper plus explicit `STATUS_BUFFER_TOO_SMALL` handling for undersized directory buffers; `src/fs-winfsp/src/mount.cpp` now canonicalizes open-node cache keys after lookup so case-insensitive repeated opens reuse the same node identity; `tests/unit/apfs_tests.cpp` covers large-directory path lookup, large-file reads, case-variant node reuse, and marker/resume paging across the stress fixture; `tools/dev/orchard-winfsp-shell-smoke.ps1` mounts the stress fixture, validates repeated root and large-directory listings, nested preview reads, copy-out hash equality, and clean unmount; on `2026-04-13` the user confirmed the mounted volume appeared in File Explorer and copied `copy-source.bin` successfully to `C:\Users\luism\OneDrive\Escritorio`.
 
 - [ ] `M2-T04` Symlink and hard-link read behavior
   Status: `Planned`
@@ -752,4 +754,5 @@ Start here once implementation begins:
 - [x] `NOW-11` Start `M1-T05` inode, dentry, and path lookup
 - [x] `NOW-12` Start `M2-T01` WinFsp read-only adapter skeleton on top of the offline reader core
 - [x] `NOW-13` Start `M2-T02` file and directory query mapping hardening on top of the mounted adapter
-- [ ] `NOW-14` Start `M2-T03` read-path Explorer compatibility hardening on top of the stricter query layer
+- [x] `NOW-14` Finish `M2-T03` by recording manual Explorer browse/open/copy-out validation on top of the new shell-stress coverage
+- [ ] `NOW-15` Start `M2-T04` symlink and hard-link read behavior on top of the hardened read-only mount path

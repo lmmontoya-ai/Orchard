@@ -14,6 +14,14 @@ if(NOT DEFINED EXPECTED_VOLUME_NAME)
   message(FATAL_ERROR "EXPECTED_VOLUME_NAME is required.")
 endif()
 
+if(NOT DEFINED EXPECTED_PROBE_PATH)
+  set(EXPECTED_PROBE_PATH "/alpha.txt")
+endif()
+
+if(NOT DEFINED EXPECTED_COMPRESSION)
+  set(EXPECTED_COMPRESSION "decmpfs_uncompressed_attribute")
+endif()
+
 execute_process(
   COMMAND "${EXECUTABLE_PATH}" --target "${TARGET_PATH}"
   RESULT_VARIABLE inspect_result
@@ -36,8 +44,8 @@ set(required_fragments
   "\"name\": \"${EXPECTED_VOLUME_NAME}\""
   "\"action\": \"MountReadWrite\""
   "\"name\": \"alpha.txt\""
-  "\"path\": \"/alpha.txt\""
-  "\"compression\": \"decmpfs_uncompressed_attribute\""
+  "\"path\": \"${EXPECTED_PROBE_PATH}\""
+  "\"compression\": \"${EXPECTED_COMPRESSION}\""
 )
 
 if(DEFINED EXPECTED_PARTITION_NAME)

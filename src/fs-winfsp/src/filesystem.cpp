@@ -451,6 +451,10 @@ NTSTATUS WinFspMountSession::Read(FSP_FILE_SYSTEM* file_system, PVOID file_conte
   if (node_result.value()->metadata.kind == orchard::apfs::InodeKind::kDirectory) {
     return STATUS_FILE_IS_A_DIRECTORY;
   }
+  *bytes_transferred = 0U;
+  if (length == 0U) {
+    return STATUS_SUCCESS;
+  }
   if (offset >= node_result.value()->metadata.logical_size) {
     return STATUS_END_OF_FILE;
   }
@@ -594,8 +598,6 @@ NTSTATUS WinFspMountSession::SetSecurity(FSP_FILE_SYSTEM* file_system, PVOID fil
 NTSTATUS WinFspMountSession::ReadDirectory(FSP_FILE_SYSTEM* file_system, PVOID file_context,
                                            PWSTR pattern, PWSTR marker, PVOID buffer,
                                            const ULONG length, PULONG bytes_transferred) noexcept {
-  static_cast<void>(pattern);
-
   auto* session = FromFileSystem(file_system);
   auto directory_node_result = session->AcquireNodeFromFileContext(file_context);
   if (!directory_node_result.ok()) {
@@ -627,8 +629,16 @@ NTSTATUS WinFspMountSession::ReadDirectory(FSP_FILE_SYSTEM* file_system, PVOID f
   }
 
   const auto query_entries = FilterDirectoryQueryEntries(query_entries_result.value(), request);
+  const auto query_page = PaginateDirectoryQueryEntries(
+      query_entries, DirectoryQueryPaginationConfig{
+                         .max_bytes = length,
+                         .base_entry_size = sizeof(FSP_FSCTL_DIR_INFO),
+                     });
+  if (query_page.entries.empty() && !query_entries.empty()) {
+    return STATUS_BUFFER_TOO_SMALL;
+  }
 
-  for (const auto& query_entry : query_entries) {
+  for (const auto& query_entry : query_page.entries) {
     std::vector<std::uint8_t> dir_info_bytes(
         sizeof(FSP_FSCTL_DIR_INFO) + query_entry.file_name.size() * sizeof(WCHAR), 0U);
     auto* dir_info = reinterpret_cast<FSP_FSCTL_DIR_INFO*>(dir_info_bytes.data());

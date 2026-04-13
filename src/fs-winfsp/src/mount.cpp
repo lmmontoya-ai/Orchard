@@ -249,9 +249,9 @@ MountedVolume::AcquireOpenNode(std::string_view normalized_path) {
     return created_result.error();
   }
 
+  const auto canonical_path = created_result.value()->normalized_path;
   std::scoped_lock lock(nodes_mutex_);
-  auto [entry, inserted] =
-      nodes_by_path_.try_emplace(std::string(normalized_path), NodeCacheEntry{});
+  auto [entry, inserted] = nodes_by_path_.try_emplace(canonical_path, NodeCacheEntry{});
   if (inserted) {
     entry->second.node = created_result.value();
     entry->second.open_handle_count = 1U;

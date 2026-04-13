@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <fstream>
 #include <optional>
+#include <set>
 #include <string_view>
 #include <vector>
 
@@ -89,6 +90,16 @@ struct FixtureOptions {
   std::uint16_t role = orchard::apfs::kVolumeRoleData;
   bool delete_latest_volume_mapping = false;
 };
+
+struct LoadedVolumeContext {
+  orchard::blockio::ReaderHandle reader;
+  orchard::apfs::VolumeContext volume;
+};
+
+std::filesystem::path SampleFixturePath(const std::string_view filename) {
+  return std::filesystem::path(ORCHARD_SOURCE_DIR) / "tests" / "corpus" / "samples" /
+         std::string(filename);
+}
 
 void WriteLe16(std::vector<std::uint8_t>& bytes, const std::size_t offset,
                const std::uint16_t value) {
@@ -656,6 +667,18 @@ orchard::apfs::VolumeContext LoadVolumeContext(orchard::blockio::Reader& reader)
   return volume_result.value();
 }
 
+LoadedVolumeContext LoadVolumeContextFromPath(const std::filesystem::path& image_path) {
+  const auto target_info = orchard::blockio::InspectTargetPath(image_path);
+  auto reader_result = orchard::blockio::OpenReader(target_info);
+  ORCHARD_TEST_REQUIRE(reader_result.ok());
+  auto reader = std::move(reader_result).value();
+  auto volume = LoadVolumeContext(*reader);
+  return LoadedVolumeContext{
+      .reader = std::move(reader),
+      .volume = std::move(volume),
+  };
+}
+
 void DetectsNxsbMagicAtObjectOffset() {
   std::vector<std::uint8_t> bytes(64U, 0U);
   WriteAscii(bytes, orchard::apfs::kApfsObjectMagicOffset, "NXSB");
@@ -1053,7 +1076,7 @@ void WinFspMountedVolumeReusesOpenNodeIdentity() {
 
   const auto first_open_result = mounted_volume_result.value()->AcquireOpenNode("/alpha.txt");
   ORCHARD_TEST_REQUIRE(first_open_result.ok());
-  const auto second_open_result = mounted_volume_result.value()->AcquireOpenNode("/alpha.txt");
+  const auto second_open_result = mounted_volume_result.value()->AcquireOpenNode("/ALPHA.TXT");
   ORCHARD_TEST_REQUIRE(second_open_result.ok());
   ORCHARD_TEST_REQUIRE(first_open_result.value().get() == second_open_result.value().get());
 
@@ -1061,6 +1084,97 @@ void WinFspMountedVolumeReusesOpenNodeIdentity() {
   mounted_volume_result.value()->ReleaseOpenNode(second_open_result.value().get());
 
   std::filesystem::remove(temp_path);
+}
+
+void LargeFixtureSupportsLargeDirectoryPathLookupAndFileRead() {
+  auto loaded = LoadVolumeContextFromPath(SampleFixturePath("explorer-large.img"));
+  auto& volume = loaded.volume;
+
+  const auto root_entries_result = orchard::apfs::ListDirectory(volume, "/");
+  ORCHARD_TEST_REQUIRE(root_entries_result.ok());
+  ORCHARD_TEST_REQUIRE(root_entries_result.value().size() == 4U);
+  ORCHARD_TEST_REQUIRE(root_entries_result.value()[0].key.name == "alpha.txt");
+  ORCHARD_TEST_REQUIRE(root_entries_result.value()[1].key.name == "bulk items");
+  ORCHARD_TEST_REQUIRE(root_entries_result.value()[2].key.name == "copy-source.bin");
+  ORCHARD_TEST_REQUIRE(root_entries_result.value()[3].key.name == "preview.txt");
+
+  const auto bulk_entries_result = orchard::apfs::ListDirectory(volume, "/bulk items");
+  ORCHARD_TEST_REQUIRE(bulk_entries_result.ok());
+  ORCHARD_TEST_REQUIRE(bulk_entries_result.value().size() == 181U);
+
+  const auto nested_lookup_result =
+      orchard::apfs::LookupPath(volume, "/bulk items/Nested Folder/deep-note.txt");
+  ORCHARD_TEST_REQUIRE(nested_lookup_result.ok());
+  const auto nested_bytes =
+      orchard::apfs::ReadWholeFile(volume, nested_lookup_result.value().inode.key.header.object_id);
+  ORCHARD_TEST_REQUIRE(nested_bytes.ok());
+  ORCHARD_TEST_REQUIRE(std::string(nested_bytes.value().begin(), nested_bytes.value().end()) ==
+                       "Explorer deep note\n");
+
+  const auto copy_lookup_result = orchard::apfs::LookupPath(volume, "/copy-source.bin");
+  ORCHARD_TEST_REQUIRE(copy_lookup_result.ok());
+  const auto copy_bytes =
+      orchard::apfs::ReadWholeFile(volume, copy_lookup_result.value().inode.key.header.object_id);
+  ORCHARD_TEST_REQUIRE(copy_bytes.ok());
+  ORCHARD_TEST_REQUIRE(copy_bytes.value().size() ==
+                       (static_cast<std::size_t>(4U) * kApfsBlockSize));
+  ORCHARD_TEST_REQUIRE(std::string(copy_bytes.value().begin(), copy_bytes.value().begin() + 22) ==
+                       "ORCHARD-COPY-BLOCK-00\n");
+}
+
+void WinFspLargeDirectoryPaginationResumesDeterministically() {
+  orchard::fs_winfsp::MountConfig config;
+  config.target_path = SampleFixturePath("explorer-large.img");
+  config.mount_point = L"V:";
+
+  const auto mounted_volume_result = orchard::fs_winfsp::OpenMountedVolume(config);
+  ORCHARD_TEST_REQUIRE(mounted_volume_result.ok());
+
+  const auto bulk_result = mounted_volume_result.value()->ResolveFileNode("/bulk items");
+  ORCHARD_TEST_REQUIRE(bulk_result.ok());
+  const auto entries_result =
+      mounted_volume_result.value()->ListDirectoryEntries(bulk_result.value().inode_id);
+  ORCHARD_TEST_REQUIRE(entries_result.ok());
+
+  const auto query_entries_result = orchard::fs_winfsp::BuildDirectoryQueryEntries(
+      mounted_volume_result.value()->volume_context(), bulk_result.value(), entries_result.value());
+  ORCHARD_TEST_REQUIRE(query_entries_result.ok());
+  ORCHARD_TEST_REQUIRE(query_entries_result.value().size() == 181U);
+
+  std::vector<std::wstring> expected_names;
+  expected_names.reserve(query_entries_result.value().size());
+  for (const auto& query_entry : query_entries_result.value()) {
+    expected_names.push_back(query_entry.file_name);
+  }
+
+  std::vector<std::wstring> paged_names;
+  std::optional<std::wstring> marker;
+  for (std::size_t iteration = 0; iteration < 64U; ++iteration) {
+    const auto filtered_entries = orchard::fs_winfsp::FilterDirectoryQueryEntries(
+        query_entries_result.value(), orchard::fs_winfsp::DirectoryQueryRequest{
+                                          .marker = marker,
+                                          .pattern = L"*",
+                                          .case_insensitive = true,
+                                      });
+    const auto page = orchard::fs_winfsp::PaginateDirectoryQueryEntries(
+        filtered_entries, orchard::fs_winfsp::DirectoryQueryPaginationConfig{
+                              .max_bytes = 1024U,
+                              .base_entry_size = 64U,
+                          });
+    ORCHARD_TEST_REQUIRE(!page.entries.empty());
+    for (const auto& entry : page.entries) {
+      paged_names.push_back(entry.file_name);
+    }
+    if (!page.truncated) {
+      break;
+    }
+    ORCHARD_TEST_REQUIRE(page.last_emitted_name.has_value());
+    marker = page.last_emitted_name;
+  }
+
+  ORCHARD_TEST_REQUIRE(paged_names == expected_names);
+  std::set<std::wstring> unique_names(paged_names.begin(), paged_names.end());
+  ORCHARD_TEST_REQUIRE(unique_names.size() == paged_names.size());
 }
 
 void WinFspMountedVolumeOpensSyntheticFixture() {
@@ -1146,6 +1260,10 @@ int main() {
       {"WinFspDirectoryQueryFiltersDeterministically",
        &WinFspDirectoryQueryFiltersDeterministically},
       {"WinFspMountedVolumeReusesOpenNodeIdentity", &WinFspMountedVolumeReusesOpenNodeIdentity},
+      {"LargeFixtureSupportsLargeDirectoryPathLookupAndFileRead",
+       &LargeFixtureSupportsLargeDirectoryPathLookupAndFileRead},
+      {"WinFspLargeDirectoryPaginationResumesDeterministically",
+       &WinFspLargeDirectoryPaginationResumesDeterministically},
       {"WinFspMountedVolumeOpensSyntheticFixture", &WinFspMountedVolumeOpensSyntheticFixture},
       {"WinFspMountedVolumeRejectsReadWritePolicyWhenDowngradeDisabled",
        &WinFspMountedVolumeRejectsReadWritePolicyWhenDowngradeDisabled},
