@@ -17,10 +17,11 @@ struct FileMetadata {
 };
 
 blockio::Result<FileMetadata> GetFileMetadata(const VolumeContext& volume, std::uint64_t inode_id);
+
 blockio::Result<std::vector<std::uint8_t>> ReadFileRange(const VolumeContext& volume,
                                                          std::uint64_t inode_id,
-                                                         std::uint64_t offset,
-                                                         std::size_t size);
+                                                         std::uint64_t offset, std::size_t size);
+
 blockio::Result<std::vector<std::uint8_t>> ReadWholeFile(const VolumeContext& volume,
                                                          std::uint64_t inode_id);
 

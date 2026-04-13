@@ -51,9 +51,8 @@ struct XattrRecord {
 
 blockio::Result<InodeRecord> ParseInodeRecord(std::span<const std::uint8_t> key,
                                               std::span<const std::uint8_t> value);
-blockio::Result<DirectoryEntryRecord> ParseDirectoryEntryRecord(
-    std::span<const std::uint8_t> key,
-    std::span<const std::uint8_t> value);
+blockio::Result<DirectoryEntryRecord>
+ParseDirectoryEntryRecord(std::span<const std::uint8_t> key, std::span<const std::uint8_t> value);
 blockio::Result<FileExtentRecord> ParseFileExtentRecord(std::span<const std::uint8_t> key,
                                                         std::span<const std::uint8_t> value);
 blockio::Result<XattrRecord> ParseXattrRecord(std::span<const std::uint8_t> key,

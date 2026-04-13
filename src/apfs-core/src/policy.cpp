@@ -18,8 +18,8 @@ void AppendReason(std::vector<PolicyReason>& reasons, const PolicyReason reason)
 }
 
 bool IsHelperRole(const std::uint16_t role) {
-  return (role & (kVolumeRoleSystem | kVolumeRoleRecovery | kVolumeRoleVm |
-                  kVolumeRolePreboot | kVolumeRoleInstaller)) != 0U;
+  return (role & (kVolumeRoleSystem | kVolumeRoleRecovery | kVolumeRoleVm | kVolumeRolePreboot |
+                  kVolumeRoleInstaller)) != 0U;
 }
 
 void AppendRoleReasons(std::vector<PolicyReason>& reasons, const std::uint16_t role) {
@@ -46,12 +46,10 @@ PolicyDecision EvaluatePolicy(const PolicyInput& input) {
   PolicyDecision decision;
 
   const auto supported_readwrite_incompatible = kVolumeIncompatCaseInsensitive;
-  const auto explicitly_handled_incompatible = kVolumeIncompatCaseInsensitive |
-                                               kVolumeIncompatDatalessSnaps |
-                                               kVolumeIncompatEncRolled |
-                                               kVolumeIncompatNormalizationInsensitive |
-                                               kVolumeIncompatIncompleteRestore |
-                                               kVolumeIncompatSealed;
+  const auto explicitly_handled_incompatible =
+      kVolumeIncompatCaseInsensitive | kVolumeIncompatDatalessSnaps | kVolumeIncompatEncRolled |
+      kVolumeIncompatNormalizationInsensitive | kVolumeIncompatIncompleteRestore |
+      kVolumeIncompatSealed;
   const auto unknown_incompatible =
       input.volume_incompatible_features & ~explicitly_handled_incompatible;
 
@@ -97,15 +95,16 @@ PolicyDecision EvaluatePolicy(const PolicyInput& input) {
 
   if (!decision.reasons.empty()) {
     decision.action = MountDisposition::kMountReadOnly;
-    decision.summary = "Readable, but held read-only because v1 does not support all detected features.";
+    decision.summary =
+        "Readable, but held read-only because v1 does not support all detected features.";
     return decision;
   }
 
   if ((input.volume_incompatible_features & ~supported_readwrite_incompatible) != 0U) {
     decision.action = MountDisposition::kMountReadOnly;
     AppendReason(decision.reasons, PolicyReason::kUnsupportedVolumeFeature);
-    decision.summary =
-        "Readable, but held read-only because the volume advertises unsupported incompatible flags.";
+    decision.summary = "Readable, but held read-only because the volume advertises unsupported "
+                       "incompatible flags.";
     return decision;
   }
 

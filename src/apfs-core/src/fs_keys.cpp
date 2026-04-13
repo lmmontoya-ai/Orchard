@@ -51,8 +51,8 @@ blockio::Result<InodeKey> ParseInodeKey(const std::span<const std::uint8_t> byte
   return InodeKey{.header = header_result.value()};
 }
 
-blockio::Result<DirectoryRecordKey> ParseDirectoryRecordKey(
-    const std::span<const std::uint8_t> bytes) {
+blockio::Result<DirectoryRecordKey>
+ParseDirectoryRecordKey(const std::span<const std::uint8_t> bytes) {
   auto header_result = ParseFsKeyHeader(bytes);
   if (!header_result.ok()) {
     return header_result.error();

@@ -15,8 +15,7 @@ std::string FoldName(const std::string_view text) {
   return folded;
 }
 
-bool NamesEqual(const std::string_view left,
-                const std::string_view right,
+bool NamesEqual(const std::string_view left, const std::string_view right,
                 const bool case_insensitive) {
   if (!case_insensitive) {
     return left == right;
@@ -82,13 +81,11 @@ blockio::Result<ResolvedPath> LookupPath(const VolumeContext& volume, const std:
       return entries_result.error();
     }
 
-    const auto match = std::find_if(entries_result.value().begin(),
-                                    entries_result.value().end(),
-                                    [&component, &volume](const DirectoryEntryRecord& entry) {
-                                      return NamesEqual(entry.key.name,
-                                                        component,
-                                                        volume.info().case_insensitive);
-                                    });
+    const auto match =
+        std::find_if(entries_result.value().begin(), entries_result.value().end(),
+                     [&component, &volume](const DirectoryEntryRecord& entry) {
+                       return NamesEqual(entry.key.name, component, volume.info().case_insensitive);
+                     });
     if (match == entries_result.value().end()) {
       std::ostringstream message;
       message << "Path component '" << component << "' was not found in the directory.";
@@ -112,8 +109,8 @@ blockio::Result<ResolvedPath> LookupPath(const VolumeContext& volume, const std:
   return resolved;
 }
 
-blockio::Result<std::vector<DirectoryEntryRecord>> ListDirectory(const VolumeContext& volume,
-                                                                 const std::uint64_t directory_inode_id) {
+blockio::Result<std::vector<DirectoryEntryRecord>>
+ListDirectory(const VolumeContext& volume, const std::uint64_t directory_inode_id) {
   auto inode_result = volume.GetInode(directory_inode_id);
   if (!inode_result.ok()) {
     return inode_result.error();

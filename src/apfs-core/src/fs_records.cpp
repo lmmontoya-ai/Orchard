@@ -46,9 +46,9 @@ blockio::Result<InodeRecord> ParseInodeRecord(const std::span<const std::uint8_t
   return record;
 }
 
-blockio::Result<DirectoryEntryRecord> ParseDirectoryEntryRecord(
-    const std::span<const std::uint8_t> key,
-    const std::span<const std::uint8_t> value) {
+blockio::Result<DirectoryEntryRecord>
+ParseDirectoryEntryRecord(const std::span<const std::uint8_t> key,
+                          const std::span<const std::uint8_t> value) {
   auto key_result = ParseDirectoryRecordKey(key);
   if (!key_result.ok()) {
     return key_result.error();
@@ -104,13 +104,18 @@ blockio::Result<XattrRecord> ParseXattrRecord(const std::span<const std::uint8_t
   XattrRecord record;
   record.key = key_result.value();
   record.flags = ReadLe16(value, 0x00U);
-  record.data.assign(value.begin() + 8, value.begin() + 8 + static_cast<std::ptrdiff_t>(data_length));
+  record.data.assign(value.begin() + 8,
+                     value.begin() + 8 + static_cast<std::ptrdiff_t>(data_length));
   return record;
 }
 
-bool IsDirectory(const InodeKind kind) noexcept { return kind == InodeKind::kDirectory; }
+bool IsDirectory(const InodeKind kind) noexcept {
+  return kind == InodeKind::kDirectory;
+}
 
-bool IsRegularFile(const InodeKind kind) noexcept { return kind == InodeKind::kRegularFile; }
+bool IsRegularFile(const InodeKind kind) noexcept {
+  return kind == InodeKind::kRegularFile;
+}
 
 std::string_view ToString(const InodeKind kind) noexcept {
   switch (kind) {

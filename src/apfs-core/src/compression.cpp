@@ -40,8 +40,8 @@ blockio::Result<CompressionInfo> ParseCompressionInfo(const std::span<const std:
   return info;
 }
 
-blockio::Result<std::vector<std::uint8_t>> DecodeCompressionPayload(
-    const std::span<const std::uint8_t> bytes) {
+blockio::Result<std::vector<std::uint8_t>>
+DecodeCompressionPayload(const std::span<const std::uint8_t> bytes) {
   auto info_result = ParseCompressionInfo(bytes);
   if (!info_result.ok()) {
     return info_result.error();
@@ -59,9 +59,8 @@ blockio::Result<std::vector<std::uint8_t>> DecodeCompressionPayload(
                          "Compression xattr payload is smaller than the advertised size.");
   }
 
-  return std::vector<std::uint8_t>(payload.begin(),
-                                   payload.begin() +
-                                       static_cast<std::ptrdiff_t>(info.uncompressed_size));
+  return std::vector<std::uint8_t>(
+      payload.begin(), payload.begin() + static_cast<std::ptrdiff_t>(info.uncompressed_size));
 }
 
 std::string_view ToString(const CompressionKind kind) noexcept {
