@@ -99,6 +99,7 @@ Regenerate synthetic sample fixtures:
 - Static analysis is driven by `.clang-tidy` and `tools/dev/orchard-lint.ps1`.
 - The maintenance scripts skip tracked files that have been deleted from the worktree, which matters after test-file renames.
 - The lint wrapper treats `clang-tidy` failures as hard failures; do not rely on its console output alone.
+- `tools/dev/orchard-lint.ps1` now follows `compile_commands.json` rather than `git ls-files`, so optional backends like WinFsp are linted only when the active CMake configuration actually includes them.
 
 ## M1 notes
 

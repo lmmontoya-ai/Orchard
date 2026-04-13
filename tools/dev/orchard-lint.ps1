@@ -27,22 +27,22 @@ $clangTidy = & $resolveToolScript `
     "C:\Program Files\LLVM\bin\clang-tidy.exe"
   )
 
-$git = & $resolveToolScript -ToolName "git"
-$files = & $git -C $repoRoot ls-files -- '*.cc' '*.cpp' '*.cxx'
+$compileEntries = Get-Content $compileCommands | ConvertFrom-Json
+$files =
+  @($compileEntries |
+    ForEach-Object { $_.file } |
+    Where-Object { $_ -and (Test-Path $_) } |
+    Sort-Object -Unique)
 
 if (-not $files) {
   Write-Host "No translation units matched the lint scope."
   exit 0
 }
 
-foreach ($relativePath in $files) {
-  $fullPath = Join-Path $repoRoot $relativePath
-  if (-not (Test-Path $fullPath)) {
-    continue
-  }
+foreach ($fullPath in $files) {
   & $clangTidy "--quiet" "-p=$resolvedBuildDir" $fullPath
   if ($LASTEXITCODE -ne 0) {
-    throw "clang-tidy failed for '$relativePath'."
+    throw "clang-tidy failed for '$fullPath'."
   }
 }
 
