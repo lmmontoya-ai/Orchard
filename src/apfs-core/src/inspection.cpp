@@ -183,17 +183,38 @@ void EnrichVolumeInfo(const blockio::Reader& reader, const ContainerInfo& contai
   PopulateFileProbes(volume, volume_result.value(), root_entries_result.value());
 }
 
-void EnrichInspectionReport(const blockio::Reader& reader, DiscoveryReport& report) {
+bool ShouldEnrichVolume(const VolumeInfo& volume, const InspectionOptions& options) {
+  return !options.volume_object_id.has_value() || volume.object_id == *options.volume_object_id;
+}
+
+bool EnrichInspectionReport(const blockio::Reader& reader, DiscoveryReport& report,
+                            const bool enable_volume_enrichment, const InspectionOptions& options) {
+  if (!enable_volume_enrichment) {
+    return false;
+  }
+
+  bool enriched_any_volume = false;
   for (auto& container : report.containers) {
     for (auto& volume : container.volumes) {
+      if (!ShouldEnrichVolume(volume, options)) {
+        continue;
+      }
       EnrichVolumeInfo(reader, container, volume);
+      enriched_any_volume = true;
     }
   }
+
+  return enriched_any_volume;
 }
 
 } // namespace
 
 InspectionResult InspectTarget(const blockio::InspectionTargetInfo& target_info) {
+  return InspectTarget(target_info, InspectionOptions{});
+}
+
+InspectionResult InspectTarget(const blockio::InspectionTargetInfo& target_info,
+                               const InspectionOptions& options) {
   switch (target_info.kind) {
   case blockio::TargetKind::kMissing:
     return MakeStatusOnly(InspectionStatus::kMissingTarget,
@@ -238,7 +259,23 @@ InspectionResult InspectTarget(const blockio::InspectionTargetInfo& target_info)
   }
 
   result.report = std::move(discovery_result.value());
-  EnrichInspectionReport(*reader, result.report);
+  const auto enable_volume_enrichment =
+      target_info.kind != blockio::TargetKind::kRawDevice || options.enrich_raw_device_volumes;
+  const auto enriched_any_volume =
+      EnrichInspectionReport(*reader, result.report, enable_volume_enrichment, options);
+  if (!enable_volume_enrichment && !result.report.containers.empty()) {
+    result.notes.push_back(
+        "Skipped root-directory enrichment for the raw device target to keep inspection bounded.");
+  } else if (target_info.kind == blockio::TargetKind::kRawDevice &&
+             options.enrich_raw_device_volumes) {
+    if (options.volume_object_id.has_value() && !enriched_any_volume) {
+      result.notes.push_back("Requested raw-device volume enrichment did not match any volume.");
+    } else if (options.volume_object_id.has_value()) {
+      result.notes.push_back("Enriched the selected raw-device APFS volume on demand.");
+    } else {
+      result.notes.push_back("Enriched raw-device APFS volumes on demand.");
+    }
+  }
   result.notes.insert(result.notes.end(), result.report.notes.begin(), result.report.notes.end());
   result.status = result.report.containers.empty() ? InspectionStatus::kNoApfsContainer
                                                    : InspectionStatus::kSuccess;

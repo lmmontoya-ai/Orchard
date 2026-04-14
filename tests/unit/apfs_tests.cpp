@@ -5,6 +5,7 @@
 #include <optional>
 #include <set>
 #include <string_view>
+#include <tuple>
 #include <vector>
 
 #ifndef NOMINMAX
@@ -16,6 +17,7 @@
 #include "orchard/apfs/discovery.h"
 #include "orchard/apfs/file_read.h"
 #include "orchard/apfs/fs_keys.h"
+#include "orchard/apfs/fs_search.h"
 #include "orchard/apfs/inspection.h"
 #include "orchard/apfs/link_read.h"
 #include "orchard/apfs/object.h"
@@ -64,6 +66,9 @@ constexpr std::uint64_t kNoteInodeId = 31U;
 constexpr std::uint64_t kSparseInodeId = 40U;
 constexpr std::uint64_t kCompressedInodeId = 50U;
 constexpr std::uint64_t kEmptyInodeId = 60U;
+constexpr std::uint64_t kLateDirectoryInodeId = 70U;
+constexpr std::uint64_t kLateFileInodeId = 71U;
+constexpr std::uint64_t kLateXattrFileInodeId = 80U;
 
 constexpr std::string_view kAlphaExtent1 = "Hello ";
 constexpr std::string_view kAlphaExtent2 = "Orchard\n";
@@ -316,6 +321,29 @@ std::vector<std::uint8_t> MakeFileExtentKey(const std::uint64_t object_id,
   return bytes;
 }
 
+std::tuple<std::uint64_t, std::uint8_t, std::uint64_t, std::string>
+MakeSyntheticFsSortKey(const std::span<const std::uint8_t> key_bytes) {
+  constexpr std::uint64_t kFsKeyObjectIdMask = 0x0FFFFFFFFFFFFFFFULL;
+
+  const auto raw_header = orchard::apfs::ReadLe64(key_bytes, 0U);
+  const auto object_id = raw_header & kFsKeyObjectIdMask;
+  const auto record_type = static_cast<std::uint8_t>((raw_header >> 60U) & 0x0FU);
+  if (record_type == static_cast<std::uint8_t>(orchard::apfs::FsRecordType::kFileExtent) &&
+      key_bytes.size() >= 16U) {
+    return {object_id, record_type, orchard::apfs::ReadLe64(key_bytes, 8U), std::string{}};
+  }
+  if ((record_type == static_cast<std::uint8_t>(orchard::apfs::FsRecordType::kDirRecord) ||
+       record_type == static_cast<std::uint8_t>(orchard::apfs::FsRecordType::kXattr)) &&
+      key_bytes.size() >= 10U) {
+    const auto length = orchard::apfs::ReadLe16(key_bytes, 8U);
+    if (orchard::apfs::HasRange(key_bytes, 10U, length)) {
+      return {object_id, record_type, 0U,
+              std::string(key_bytes.begin() + 10, key_bytes.begin() + 10 + length)};
+    }
+  }
+  return {object_id, record_type, 0U, std::string{}};
+}
+
 std::vector<std::uint8_t>
 MakeInodeValue(const std::uint64_t parent_id, const std::uint64_t logical_size,
                const std::uint64_t allocated_size, const std::uint64_t internal_flags,
@@ -343,10 +371,79 @@ MakeInodeValue(const std::uint64_t parent_id, const std::uint64_t logical_size,
   return bytes;
 }
 
+std::vector<std::uint8_t>
+MakeRealInodeValue(const std::uint64_t parent_id, const std::uint64_t logical_size,
+                   const std::uint64_t allocated_size, const std::uint64_t internal_flags,
+                   const std::uint32_t children_or_links, const std::uint16_t mode,
+                   const bool include_dstream_xfield,
+                   const std::uint64_t creation_time_unix_nanos = kDefaultTimestampUnixNanos,
+                   const std::optional<std::uint64_t> last_access_time_unix_nanos = std::nullopt,
+                   const std::optional<std::uint64_t> last_write_time_unix_nanos = std::nullopt,
+                   const std::optional<std::uint64_t> change_time_unix_nanos = std::nullopt) {
+  constexpr std::size_t kRealInodeFixedSize = 0x5CU;
+  constexpr std::size_t kXfieldHeaderSize = 4U;
+  constexpr std::size_t kXfieldDescriptorSize = 4U;
+  constexpr std::size_t kDstreamSize = 40U;
+  constexpr std::uint8_t kInodeXfieldTypeDstream = 8U;
+
+  const auto access_time = last_access_time_unix_nanos.value_or(creation_time_unix_nanos);
+  const auto write_time = last_write_time_unix_nanos.value_or(creation_time_unix_nanos);
+  const auto change_time = change_time_unix_nanos.value_or(write_time);
+  const auto bytes_size =
+      include_dstream_xfield
+          ? (kRealInodeFixedSize + kXfieldHeaderSize + kXfieldDescriptorSize + kDstreamSize)
+          : (kRealInodeFixedSize + kXfieldHeaderSize);
+  std::vector<std::uint8_t> bytes(bytes_size, 0U);
+
+  WriteLe64(bytes, 0x00U, parent_id);
+  WriteLe64(bytes, 0x10U, creation_time_unix_nanos);
+  WriteLe64(bytes, 0x18U, write_time);
+  WriteLe64(bytes, 0x20U, change_time);
+  WriteLe64(bytes, 0x28U, access_time);
+  WriteLe64(bytes, 0x30U, internal_flags);
+  WriteLe32(bytes, 0x38U, children_or_links);
+  WriteLe16(bytes, 0x50U, mode);
+  WriteLe64(bytes, 0x54U, logical_size);
+
+  if (!include_dstream_xfield) {
+    WriteLe16(bytes, kRealInodeFixedSize + 0x00U, 0U);
+    WriteLe16(bytes, kRealInodeFixedSize + 0x02U, 0U);
+    return bytes;
+  }
+
+  WriteLe16(bytes, kRealInodeFixedSize + 0x00U, 1U);
+  WriteLe16(bytes, kRealInodeFixedSize + 0x02U, static_cast<std::uint16_t>(kDstreamSize));
+  bytes[kRealInodeFixedSize + kXfieldHeaderSize + 0x00U] = kInodeXfieldTypeDstream;
+  bytes[kRealInodeFixedSize + kXfieldHeaderSize + 0x01U] = 0U;
+  WriteLe16(bytes, kRealInodeFixedSize + kXfieldHeaderSize + 0x02U,
+            static_cast<std::uint16_t>(kDstreamSize));
+  WriteLe64(bytes, kRealInodeFixedSize + kXfieldHeaderSize + kXfieldDescriptorSize + 0x00U,
+            logical_size);
+  WriteLe64(bytes, kRealInodeFixedSize + kXfieldHeaderSize + kXfieldDescriptorSize + 0x08U,
+            allocated_size);
+  return bytes;
+}
+
 std::vector<std::uint8_t> MakeDirectoryValue(const std::uint64_t file_id) {
   std::vector<std::uint8_t> bytes(10U, 0U);
   WriteLe64(bytes, 0x00U, file_id);
   WriteLe16(bytes, 0x08U, 0U);
+  return bytes;
+}
+
+std::vector<std::uint8_t> MakeHashedDirectoryKey(const std::uint64_t parent_id,
+                                                 const std::string_view name,
+                                                 const std::uint32_t hash = 0x12345000U,
+                                                 const bool include_terminator = true) {
+  std::vector<std::uint8_t> bytes(12U + name.size() + (include_terminator ? 1U : 0U), 0U);
+  WriteLe64(bytes, 0U,
+            parent_id |
+                (static_cast<std::uint64_t>(orchard::apfs::FsRecordType::kDirRecord) << 60U));
+  WriteLe32(bytes, 8U, hash | static_cast<std::uint32_t>(name.size() & 0x000003FFU));
+  WriteAscii(bytes, 12U, name);
+  if (include_terminator) {
+    bytes.back() = 0U;
+  }
   return bytes;
 }
 
@@ -369,6 +466,14 @@ std::vector<std::uint8_t> MakeCompressionPayload(const std::string_view text) {
 }
 
 std::vector<std::uint8_t> MakeXattrValue(const std::vector<std::uint8_t>& data) {
+  std::vector<std::uint8_t> bytes(4U + data.size(), 0U);
+  WriteLe16(bytes, 0x00U, 0U);
+  WriteLe16(bytes, 0x02U, static_cast<std::uint16_t>(data.size()));
+  std::copy(data.begin(), data.end(), bytes.begin() + 4);
+  return bytes;
+}
+
+std::vector<std::uint8_t> MakeLegacySyntheticXattrValue(const std::vector<std::uint8_t>& data) {
   std::vector<std::uint8_t> bytes(8U + data.size(), 0U);
   WriteLe16(bytes, 0x00U, 0U);
   WriteLe32(bytes, 0x04U, static_cast<std::uint32_t>(data.size()));
@@ -438,6 +543,84 @@ void WriteVariableBtreeRootLeafNode(std::vector<std::uint8_t>& bytes, const std:
   WriteLe32(bytes, footer_offset + 0x14U, longest_value);
   WriteLe64(bytes, footer_offset + 0x18U, records.size());
   WriteLe64(bytes, footer_offset + 0x20U, 1U);
+}
+
+void WriteVariableBtreeInternalNode(std::vector<std::uint8_t>& bytes, const std::size_t base_offset,
+                                    const std::uint64_t oid, const std::uint64_t xid,
+                                    const std::uint32_t subtype,
+                                    const std::vector<VariableRecord>& records,
+                                    const bool root_node) {
+  const auto table_length = static_cast<std::uint16_t>(records.size() * 8U);
+  const auto key_area_start = base_offset + orchard::apfs::kBtreeNodeHeaderSize + table_length;
+  const auto footer_size = root_node ? orchard::apfs::kBtreeInfoSize : 0U;
+  const auto value_area_end = base_offset + kApfsBlockSize - footer_size;
+
+  WriteObjectHeader(
+      bytes, base_offset, oid, xid,
+      root_node ? orchard::apfs::kObjectTypeBtree : orchard::apfs::kObjectTypeBtreeNode, subtype);
+  WriteLe16(bytes, base_offset + 0x20U, root_node ? orchard::apfs::kBtreeNodeFlagRoot : 0U);
+  WriteLe16(bytes, base_offset + 0x22U, 1U);
+  WriteLe32(bytes, base_offset + 0x24U, static_cast<std::uint32_t>(records.size()));
+  WriteLe16(bytes, base_offset + 0x28U, 0U);
+  WriteLe16(bytes, base_offset + 0x2AU, table_length);
+  WriteLe16(bytes, base_offset + 0x2CU, 0U);
+  WriteLe16(bytes, base_offset + 0x2EU, 0U);
+  WriteLe16(bytes, base_offset + 0x30U, orchard::apfs::kBtreeOffsetInvalid);
+  WriteLe16(bytes, base_offset + 0x32U, 0U);
+  WriteLe16(bytes, base_offset + 0x34U, orchard::apfs::kBtreeOffsetInvalid);
+  WriteLe16(bytes, base_offset + 0x36U, 0U);
+
+  std::uint16_t next_key_offset = 0U;
+  std::uint16_t next_value_offset = 0U;
+  std::uint32_t longest_key = 0U;
+  std::uint32_t longest_value = 0U;
+
+  for (std::size_t index = 0; index < records.size(); ++index) {
+    const auto toc_offset = base_offset + orchard::apfs::kBtreeNodeHeaderSize + (index * 8U);
+    const auto key_offset = next_key_offset;
+    const auto key_length = static_cast<std::uint16_t>(records[index].key.size());
+    next_key_offset = static_cast<std::uint16_t>(next_key_offset + key_length);
+    const auto value_length = static_cast<std::uint16_t>(records[index].value.size());
+    next_value_offset = static_cast<std::uint16_t>(next_value_offset + value_length);
+    const auto value_offset = next_value_offset;
+    const auto key_write_offset = key_area_start + key_offset;
+    const auto value_write_offset = value_area_end - value_offset;
+
+    WriteLe16(bytes, toc_offset + 0x00U, key_offset);
+    WriteLe16(bytes, toc_offset + 0x02U, key_length);
+    WriteLe16(bytes, toc_offset + 0x04U, value_offset);
+    WriteLe16(bytes, toc_offset + 0x06U, value_length);
+
+    std::copy(records[index].key.begin(), records[index].key.end(),
+              bytes.begin() + static_cast<std::ptrdiff_t>(key_write_offset));
+    std::copy(records[index].value.begin(), records[index].value.end(),
+              bytes.begin() + static_cast<std::ptrdiff_t>(value_write_offset));
+
+    longest_key = std::max(longest_key, static_cast<std::uint32_t>(records[index].key.size()));
+    longest_value =
+        std::max(longest_value, static_cast<std::uint32_t>(records[index].value.size()));
+  }
+
+  if (root_node) {
+    const auto footer_offset = base_offset + kApfsBlockSize - orchard::apfs::kBtreeInfoSize;
+    WriteLe32(bytes, footer_offset + 0x00U, 0U);
+    WriteLe32(bytes, footer_offset + 0x04U, kApfsBlockSize);
+    WriteLe32(bytes, footer_offset + 0x08U, 0U);
+    WriteLe32(bytes, footer_offset + 0x0CU, 0U);
+    WriteLe32(bytes, footer_offset + 0x10U, longest_key);
+    WriteLe32(bytes, footer_offset + 0x14U, longest_value);
+    WriteLe64(bytes, footer_offset + 0x18U, records.size());
+    WriteLe64(bytes, footer_offset + 0x20U, 2U);
+  }
+}
+
+void WriteVariableBtreeLeafNode(std::vector<std::uint8_t>& bytes, const std::size_t base_offset,
+                                const std::uint64_t oid, const std::uint64_t xid,
+                                const std::uint32_t subtype,
+                                const std::vector<VariableRecord>& records) {
+  WriteVariableBtreeInternalNode(bytes, base_offset, oid, xid, subtype, records, false);
+  WriteLe16(bytes, base_offset + 0x20U, orchard::apfs::kBtreeNodeFlagLeaf);
+  WriteLe16(bytes, base_offset + 0x22U, 0U);
 }
 
 void WriteVolumeSuperblock(std::vector<std::uint8_t>& bytes, const std::size_t base_offset,
@@ -547,6 +730,10 @@ std::vector<VariableRecord> BuildFsRecords() {
       .value = MakeXattrValue(MakeCompressionPayload(kCompressedText)),
   });
 
+  std::sort(records.begin(), records.end(),
+            [](const VariableRecord& left, const VariableRecord& right) {
+              return MakeSyntheticFsSortKey(left.key) < MakeSyntheticFsSortKey(right.key);
+            });
   return records;
 }
 
@@ -610,6 +797,117 @@ std::vector<std::uint8_t> MakeDirectFixture(const FixtureOptions& options = {}) 
   WriteRawDataBlock(bytes, kNoteDataBlock, kNoteText);
   WriteRawDataBlock(bytes, kSparseDataBlock1, kSparseExtent1);
   WriteRawDataBlock(bytes, kSparseDataBlock2, kSparseExtent2);
+  return bytes;
+}
+
+std::vector<std::uint8_t> MakeDirectFixtureWithBoundedFsTreeRegression() {
+  auto bytes = MakeDirectFixture();
+
+  VariableRecord leaf1_valid_record{
+      .key = MakeInodeKey(kAlphaInodeId),
+      .value =
+          MakeInodeValue(kRootInodeId, kAlphaExtent1.size(), kAlphaExtent1.size(), 0U, 0U, 0x8000U),
+  };
+  VariableRecord leaf1_malformed_record{
+      .key = std::vector<std::uint8_t>{0xAAU, 0xBBU, 0xCCU, 0xDDU},
+      .value = std::vector<std::uint8_t>{0x00U},
+  };
+  VariableRecord leaf2_directory_inode{
+      .key = MakeInodeKey(kLateDirectoryInodeId),
+      .value = MakeInodeValue(kRootInodeId, 0U, 0U, 0U, 1U, 0x4000U),
+  };
+  VariableRecord leaf2_file_inode{
+      .key = MakeInodeKey(kLateFileInodeId),
+      .value = MakeInodeValue(kLateDirectoryInodeId, kNoteText.size(), kNoteText.size(), 0U, 0U,
+                              0x8000U),
+  };
+  VariableRecord leaf2_directory_record{
+      .key =
+          MakeNamedKey(kLateDirectoryInodeId, orchard::apfs::FsRecordType::kDirRecord, "late.txt"),
+      .value = MakeDirectoryValue(kLateFileInodeId),
+  };
+  VariableRecord leaf2_xattr_inode{
+      .key = MakeInodeKey(kLateXattrFileInodeId),
+      .value = MakeInodeValue(kRootInodeId, kCompressedText.size(), kCompressedText.size(), 0U, 0U,
+                              0x8000U),
+  };
+  VariableRecord leaf2_xattr_record{
+      .key = MakeNamedKey(kLateXattrFileInodeId, orchard::apfs::FsRecordType::kXattr, "user.test"),
+      .value = MakeXattrValue(std::vector<std::uint8_t>{'o', 'k'}),
+  };
+  VariableRecord leaf2_extent_record{
+      .key = MakeFileExtentKey(kLateFileInodeId, 0U),
+      .value = MakeFileExtentValue(kNoteText.size(), kNoteDataBlock),
+  };
+
+  VariableRecord root_leaf1_record{
+      .key = MakeInodeKey(kAlphaInodeId),
+      .value = std::vector<std::uint8_t>(8U, 0U),
+  };
+  WriteLe64(root_leaf1_record.value, 0U, kAlphaDataBlock1);
+
+  VariableRecord root_leaf2_record{
+      .key = MakeInodeKey(kLateDirectoryInodeId),
+      .value = std::vector<std::uint8_t>(8U, 0U),
+  };
+  WriteLe64(root_leaf2_record.value, 0U, kAlphaDataBlock2);
+
+  WriteVariableBtreeInternalNode(bytes, static_cast<std::size_t>(kFsTreeBlock * kApfsBlockSize),
+                                 kFsTreeObjectId, kCurrentCheckpointXid,
+                                 orchard::apfs::kObjectTypeFs,
+                                 {root_leaf1_record, root_leaf2_record}, true);
+  WriteVariableBtreeLeafNode(bytes, static_cast<std::size_t>(kAlphaDataBlock1 * kApfsBlockSize),
+                             kAlphaDataBlock1, kCurrentCheckpointXid, orchard::apfs::kObjectTypeFs,
+                             {leaf1_valid_record, leaf1_malformed_record});
+  WriteVariableBtreeLeafNode(bytes, static_cast<std::size_t>(kAlphaDataBlock2 * kApfsBlockSize),
+                             kAlphaDataBlock2, kCurrentCheckpointXid, orchard::apfs::kObjectTypeFs,
+                             {leaf2_directory_inode, leaf2_directory_record, leaf2_file_inode,
+                              leaf2_extent_record, leaf2_xattr_inode, leaf2_xattr_record});
+
+  return bytes;
+}
+
+std::vector<std::uint8_t> MakeDirectFixtureWithDirectoryCompressionXattrRegression() {
+  auto bytes = MakeDirectFixture();
+  auto records = BuildFsRecords();
+  records.push_back(VariableRecord{
+      .key = MakeNamedKey(kRootInodeId, orchard::apfs::FsRecordType::kXattr,
+                          orchard::apfs::kCompressionXattrName),
+      .value = std::vector<std::uint8_t>{0x00U, 0x00U, 0x00U, 0x00U},
+  });
+
+  std::sort(records.begin(), records.end(),
+            [](const VariableRecord& left, const VariableRecord& right) {
+              return MakeSyntheticFsSortKey(left.key) < MakeSyntheticFsSortKey(right.key);
+            });
+
+  WriteVariableBtreeRootLeafNode(bytes, kApfsBlockSize * kFsTreeBlock, kFsTreeObjectId,
+                                 kCurrentCheckpointXid, orchard::apfs::kObjectTypeFs, records);
+  return bytes;
+}
+
+std::vector<std::uint8_t> MakeDirectFixtureWithUnreadableChildMetadata() {
+  auto bytes = MakeDirectFixture();
+  auto records = BuildFsRecords();
+
+  for (auto& record : records) {
+    const auto key_result = orchard::apfs::ParseXattrKey(record.key);
+    if (!key_result.ok()) {
+      continue;
+    }
+    if (key_result.value().header.object_id == kCompressedInodeId &&
+        key_result.value().name == orchard::apfs::kCompressionXattrName) {
+      record.value = std::vector<std::uint8_t>{0x00U, 0x00U, 0x00U, 0x00U};
+    }
+  }
+
+  std::sort(records.begin(), records.end(),
+            [](const VariableRecord& left, const VariableRecord& right) {
+              return MakeSyntheticFsSortKey(left.key) < MakeSyntheticFsSortKey(right.key);
+            });
+
+  WriteVariableBtreeRootLeafNode(bytes, kApfsBlockSize * kFsTreeBlock, kFsTreeObjectId,
+                                 kCurrentCheckpointXid, orchard::apfs::kObjectTypeFs, records);
   return bytes;
 }
 
@@ -705,6 +1003,62 @@ void ParsesObjectHeaderAndRejectsShortBlock() {
   ORCHARD_TEST_REQUIRE(short_result.error().code == orchard::blockio::ErrorCode::kShortRead);
 }
 
+void ParseInodeRecordSupportsRealApfsLayout() {
+  const auto directory_result = orchard::apfs::ParseInodeRecord(orchard::apfs::FsTreeRecordView{
+      .key = MakeInodeKey(kRootInodeId),
+      .value = MakeRealInodeValue(kRootInodeId, 0U, 0U, 0U, 4U, 0x4000U, false),
+  });
+  ORCHARD_TEST_REQUIRE(directory_result.ok());
+  ORCHARD_TEST_REQUIRE(directory_result.value().kind == orchard::apfs::InodeKind::kDirectory);
+  ORCHARD_TEST_REQUIRE(directory_result.value().child_count == 4U);
+  ORCHARD_TEST_REQUIRE(directory_result.value().link_count == 0U);
+
+  const auto file_result = orchard::apfs::ParseInodeRecord(orchard::apfs::FsTreeRecordView{
+      .key = MakeInodeKey(kAlphaInodeId),
+      .value =
+          MakeRealInodeValue(kRootInodeId, 1234U, 4096U, kSparseInternalFlag, 3U, 0x8000U, true),
+  });
+  ORCHARD_TEST_REQUIRE(file_result.ok());
+  ORCHARD_TEST_REQUIRE(file_result.value().kind == orchard::apfs::InodeKind::kRegularFile);
+  ORCHARD_TEST_REQUIRE(file_result.value().link_count == 3U);
+  ORCHARD_TEST_REQUIRE(file_result.value().logical_size == 1234U);
+  ORCHARD_TEST_REQUIRE(file_result.value().allocated_size == 4096U);
+  ORCHARD_TEST_REQUIRE(file_result.value().internal_flags == kSparseInternalFlag);
+}
+
+void ParseDirectoryRecordKeySupportsHashedRealLayout() {
+  const auto key_result =
+      orchard::apfs::ParseDirectoryRecordKey(MakeHashedDirectoryKey(kRootInodeId, "LM"));
+  ORCHARD_TEST_REQUIRE(key_result.ok());
+  ORCHARD_TEST_REQUIRE(key_result.value().header.object_id == kRootInodeId);
+  ORCHARD_TEST_REQUIRE(key_result.value().header.type == orchard::apfs::FsRecordType::kDirRecord);
+  ORCHARD_TEST_REQUIRE(key_result.value().name == "LM");
+
+  std::vector<std::uint8_t> real_directory_value(18U, 0U);
+  WriteLe64(real_directory_value, 0x00U, kAlphaInodeId);
+  WriteLe16(real_directory_value, 0x10U, 0x0042U);
+  const auto record_result =
+      orchard::apfs::ParseDirectoryEntryRecord(orchard::apfs::FsTreeRecordView{
+          .key = MakeHashedDirectoryKey(kRootInodeId, "LM"),
+          .value = real_directory_value,
+      });
+  ORCHARD_TEST_REQUIRE(record_result.ok());
+  ORCHARD_TEST_REQUIRE(record_result.value().file_id == kAlphaInodeId);
+  ORCHARD_TEST_REQUIRE(record_result.value().flags == 0x0042U);
+
+  const auto no_terminator_result = orchard::apfs::ParseDirectoryRecordKey(
+      MakeHashedDirectoryKey(kRootInodeId, "LM", 0x12345000U, false));
+  ORCHARD_TEST_REQUIRE(no_terminator_result.ok());
+  ORCHARD_TEST_REQUIRE(no_terminator_result.value().name == "LM");
+
+  auto trailing_bytes_key = MakeHashedDirectoryKey(kRootInodeId, "LM");
+  trailing_bytes_key.push_back(0xAAU);
+  trailing_bytes_key.push_back(0xBBU);
+  const auto trailing_bytes_result = orchard::apfs::ParseDirectoryRecordKey(trailing_bytes_key);
+  ORCHARD_TEST_REQUIRE(trailing_bytes_result.ok());
+  ORCHARD_TEST_REQUIRE(trailing_bytes_result.value().name == "LM");
+}
+
 void ParsesLeafAndInternalBtreeNodes() {
   auto reader = orchard::blockio::MakeMemoryReader(MakeDirectFixture(), "btree-fixture");
   orchard::apfs::PhysicalObjectReader object_reader(*reader, 0U, kApfsBlockSize);
@@ -734,6 +1088,159 @@ void ParsesLeafAndInternalBtreeNodes() {
   ORCHARD_TEST_REQUIRE(fs_node_result.value().is_root());
   ORCHARD_TEST_REQUIRE(fs_node_result.value().is_leaf());
   ORCHARD_TEST_REQUIRE(!fs_node_result.value().uses_fixed_kv());
+
+  auto root_object_bytes = root_object_result.value().bytes;
+  WriteLe32(root_object_bytes, 0x18U, orchard::apfs::kObjectTypeBtree);
+  const auto root_object_type_result =
+      orchard::apfs::ParseNode(std::span(root_object_bytes), kApfsBlockSize);
+  ORCHARD_TEST_REQUIRE(root_object_type_result.ok());
+  ORCHARD_TEST_REQUIRE(root_object_type_result.value().is_root());
+  ORCHARD_TEST_REQUIRE(!root_object_type_result.value().is_leaf());
+}
+
+void BtreeWalkerResolvesChildIdentifiersThroughCallback() {
+  constexpr std::uint64_t kRootBlock = 1U;
+  constexpr std::uint64_t kLeafBlock = 2U;
+  constexpr std::uint64_t kRootOid = 500U;
+  constexpr std::uint64_t kLeafOid = 600U;
+
+  std::vector<std::uint8_t> bytes(
+      static_cast<std::vector<std::uint8_t>::size_type>(kApfsBlockSize * 3U), 0U);
+
+  VariableRecord internal_record;
+  internal_record.key = MakeInodeKey(kRootInodeId);
+  internal_record.value.resize(40U, 0U);
+  WriteLe64(internal_record.value, 0U, kLeafOid);
+
+  WriteVariableBtreeInternalNode(bytes, static_cast<std::size_t>(kRootBlock * kApfsBlockSize),
+                                 kRootOid, kCurrentCheckpointXid, orchard::apfs::kObjectTypeFs,
+                                 {internal_record}, true);
+  WriteVariableBtreeLeafNode(bytes, static_cast<std::size_t>(kLeafBlock * kApfsBlockSize), kLeafOid,
+                             kCurrentCheckpointXid, orchard::apfs::kObjectTypeFs,
+                             {VariableRecord{
+                                 .key = MakeInodeKey(kAlphaInodeId),
+                                 .value = MakeInodeValue(kRootInodeId, 0U, 0U, 0U, 0U, 0x8000U),
+                             }});
+
+  auto reader = orchard::blockio::MakeMemoryReader(bytes, "btree-child-resolver-fixture");
+  orchard::apfs::PhysicalObjectReader object_reader(*reader, 0U, kApfsBlockSize);
+  orchard::apfs::BtreeWalker walker(
+      object_reader,
+      [](const std::uint64_t child_identifier) -> orchard::blockio::Result<std::uint64_t> {
+        if (child_identifier != kLeafOid) {
+          return orchard::apfs::MakeApfsError(
+              orchard::blockio::ErrorCode::kNotFound,
+              "Unexpected child identifier in B-tree child resolver test.");
+        }
+        return kLeafBlock;
+      });
+
+  std::vector<std::vector<std::uint8_t>> visited_keys;
+  const auto visit_result = walker.VisitInOrder(
+      kRootBlock,
+      [&visited_keys](
+          const orchard::apfs::NodeRecordView& record) -> orchard::blockio::Result<bool> {
+        visited_keys.emplace_back(record.key.begin(), record.key.end());
+        return true;
+      });
+  ORCHARD_TEST_REQUIRE(visit_result.ok());
+  ORCHARD_TEST_REQUIRE(visit_result.value() == 1U);
+  ORCHARD_TEST_REQUIRE(visited_keys.size() == 1U);
+
+  const auto key_header_result = orchard::apfs::ParseFsKeyHeader(visited_keys[0]);
+  ORCHARD_TEST_REQUIRE(key_header_result.ok());
+  ORCHARD_TEST_REQUIRE(key_header_result.value().object_id == kAlphaInodeId);
+}
+
+void BtreeWalkerLowerBoundAndVisitRangeWorkAcrossMultipleLeaves() {
+  constexpr std::uint64_t kRootBlock = 1U;
+  constexpr std::uint64_t kLeaf1Block = 2U;
+  constexpr std::uint64_t kLeaf2Block = 3U;
+  constexpr std::uint64_t kRootOid = 700U;
+  constexpr std::uint64_t kLeaf1Oid = 701U;
+  constexpr std::uint64_t kLeaf2Oid = 702U;
+
+  std::vector<std::uint8_t> bytes(
+      static_cast<std::vector<std::uint8_t>::size_type>(kApfsBlockSize * 4U), 0U);
+
+  VariableRecord root_leaf1_record{
+      .key = MakeInodeKey(kAlphaInodeId),
+      .value = std::vector<std::uint8_t>(8U, 0U),
+  };
+  WriteLe64(root_leaf1_record.value, 0U, kLeaf1Block);
+
+  VariableRecord root_leaf2_record{
+      .key = MakeNamedKey(kLateDirectoryInodeId, orchard::apfs::FsRecordType::kDirRecord,
+                          "entry-a.txt"),
+      .value = std::vector<std::uint8_t>(8U, 0U),
+  };
+  WriteLe64(root_leaf2_record.value, 0U, kLeaf2Block);
+
+  WriteVariableBtreeInternalNode(bytes, static_cast<std::size_t>(kRootBlock * kApfsBlockSize),
+                                 kRootOid, kCurrentCheckpointXid, orchard::apfs::kObjectTypeFs,
+                                 {root_leaf1_record, root_leaf2_record}, true);
+  WriteVariableBtreeLeafNode(
+      bytes, static_cast<std::size_t>(kLeaf1Block * kApfsBlockSize), kLeaf1Oid,
+      kCurrentCheckpointXid, orchard::apfs::kObjectTypeFs,
+      {VariableRecord{.key = MakeInodeKey(kAlphaInodeId),
+                      .value = MakeInodeValue(kRootInodeId, 1U, 1U, 0U, 0U, 0x8000U)},
+       VariableRecord{.key = MakeInodeKey(kDocsInodeId),
+                      .value = MakeInodeValue(kRootInodeId, 1U, 1U, 0U, 0U, 0x8000U)}});
+  WriteVariableBtreeLeafNode(
+      bytes, static_cast<std::size_t>(kLeaf2Block * kApfsBlockSize), kLeaf2Oid,
+      kCurrentCheckpointXid, orchard::apfs::kObjectTypeFs,
+      {VariableRecord{.key = MakeNamedKey(kLateDirectoryInodeId,
+                                          orchard::apfs::FsRecordType::kDirRecord, "entry-a.txt"),
+                      .value = MakeDirectoryValue(kLateFileInodeId)},
+       VariableRecord{.key = MakeNamedKey(kLateDirectoryInodeId,
+                                          orchard::apfs::FsRecordType::kDirRecord, "entry-b.txt"),
+                      .value = MakeDirectoryValue(kLateXattrFileInodeId)},
+       VariableRecord{.key = MakeFileExtentKey(kLateFileInodeId, 0U),
+                      .value = MakeFileExtentValue(4U, kNoteDataBlock)}});
+
+  auto reader = orchard::blockio::MakeMemoryReader(bytes, "btree-lower-bound-fixture");
+  orchard::apfs::PhysicalObjectReader object_reader(*reader, 0U, kApfsBlockSize);
+  orchard::apfs::BtreeWalker walker(object_reader);
+
+  auto cursor_result = walker.LowerBound(
+      kRootBlock, orchard::apfs::MakeDirectoryRecordLowerBoundCompare(kLateDirectoryInodeId));
+  ORCHARD_TEST_REQUIRE(cursor_result.ok());
+  ORCHARD_TEST_REQUIRE(cursor_result.value().has_value());
+  auto cursor = std::move(cursor_result.value()).value_or(orchard::apfs::BtreeWalker::Cursor{});
+  const auto current_copy_result = cursor.CurrentCopy();
+  ORCHARD_TEST_REQUIRE(current_copy_result.ok());
+  const auto first_key_result =
+      orchard::apfs::ParseDirectoryRecordKey(std::span<const std::uint8_t>(
+          current_copy_result.value().key.data(), current_copy_result.value().key.size()));
+  ORCHARD_TEST_REQUIRE(first_key_result.ok());
+  ORCHARD_TEST_REQUIRE(first_key_result.value().name == "entry-a.txt");
+
+  std::vector<std::string> visited_names;
+  const auto visit_result = walker.VisitRange(
+      kRootBlock, orchard::apfs::MakeDirectoryRecordLowerBoundCompare(kLateDirectoryInodeId),
+      [&visited_names](
+          const orchard::apfs::NodeRecordView& record) -> orchard::blockio::Result<bool> {
+        auto matches_result =
+            orchard::apfs::IsDirectoryRecordKeyFor(record.key, kLateDirectoryInodeId);
+        if (!matches_result.ok()) {
+          return matches_result.error();
+        }
+        if (!matches_result.value()) {
+          return false;
+        }
+
+        auto key_result = orchard::apfs::ParseDirectoryRecordKey(record.key);
+        if (!key_result.ok()) {
+          return key_result.error();
+        }
+        visited_names.push_back(key_result.value().name);
+        return true;
+      });
+  ORCHARD_TEST_REQUIRE(visit_result.ok());
+  ORCHARD_TEST_REQUIRE(visit_result.value() == 3U);
+  ORCHARD_TEST_REQUIRE(visited_names.size() == 2U);
+  ORCHARD_TEST_REQUIRE(visited_names[0] == "entry-a.txt");
+  ORCHARD_TEST_REQUIRE(visited_names[1] == "entry-b.txt");
 }
 
 void OmapLookupExactAndOlderFallback() {
@@ -772,6 +1279,133 @@ void OmapLookupRejectsDeletedMapping() {
   const auto deleted_result = resolver_result.value().ResolveOidToBlock(kVolumeObjectId, 50U);
   ORCHARD_TEST_REQUIRE(!deleted_result.ok());
   ORCHARD_TEST_REQUIRE(deleted_result.error().code == orchard::blockio::ErrorCode::kNotFound);
+}
+
+void VolumeContextBoundedQueriesIgnoreEarlierMalformedLeaves() {
+  auto reader = orchard::blockio::MakeMemoryReader(MakeDirectFixtureWithBoundedFsTreeRegression(),
+                                                   "volume-bounded-range-fixture");
+  auto volume = LoadVolumeContext(*reader);
+
+  const auto directory_inode_result = volume.GetInode(kLateDirectoryInodeId);
+  ORCHARD_TEST_REQUIRE(directory_inode_result.ok());
+  ORCHARD_TEST_REQUIRE(directory_inode_result.value().kind == orchard::apfs::InodeKind::kDirectory);
+
+  const auto directory_entries_result = volume.ListDirectoryEntries(kLateDirectoryInodeId);
+  ORCHARD_TEST_REQUIRE(directory_entries_result.ok());
+  ORCHARD_TEST_REQUIRE(directory_entries_result.value().size() == 1U);
+  ORCHARD_TEST_REQUIRE(directory_entries_result.value()[0].key.name == "late.txt");
+  ORCHARD_TEST_REQUIRE(directory_entries_result.value()[0].kind ==
+                       orchard::apfs::InodeKind::kRegularFile);
+
+  const auto extents_result = volume.ListFileExtents(kLateFileInodeId);
+  ORCHARD_TEST_REQUIRE(extents_result.ok());
+  ORCHARD_TEST_REQUIRE(extents_result.value().size() == 1U);
+  ORCHARD_TEST_REQUIRE(extents_result.value()[0].physical_block == kNoteDataBlock);
+
+  const auto xattr_result = volume.FindXattr(kLateXattrFileInodeId, "user.test");
+  ORCHARD_TEST_REQUIRE(xattr_result.ok());
+  ORCHARD_TEST_REQUIRE(xattr_result.value().has_value());
+  auto xattr_record = std::move(xattr_result.value()).value_or(orchard::apfs::XattrRecord{});
+  ORCHARD_TEST_REQUIRE(std::string(xattr_record.data.begin(), xattr_record.data.end()) == "ok");
+}
+
+void ParsesRealAndLegacyXattrLayouts() {
+  const auto key =
+      MakeNamedKey(kLateXattrFileInodeId, orchard::apfs::FsRecordType::kXattr, "user.test");
+
+  const auto real_result = orchard::apfs::ParseXattrRecord(orchard::apfs::FsTreeRecordView{
+      .key = key,
+      .value = MakeXattrValue(std::vector<std::uint8_t>{'o', 'k'}),
+  });
+  ORCHARD_TEST_REQUIRE(real_result.ok());
+  ORCHARD_TEST_REQUIRE(
+      std::string(real_result.value().data.begin(), real_result.value().data.end()) == "ok");
+
+  const auto legacy_result = orchard::apfs::ParseXattrRecord(orchard::apfs::FsTreeRecordView{
+      .key = key,
+      .value = MakeLegacySyntheticXattrValue(std::vector<std::uint8_t>{'o', 'k'}),
+  });
+  ORCHARD_TEST_REQUIRE(legacy_result.ok());
+  ORCHARD_TEST_REQUIRE(
+      std::string(legacy_result.value().data.begin(), legacy_result.value().data.end()) == "ok");
+}
+
+void RawDeviceInspectionCanEnrichSelectedVolumeOnDemand() {
+  const auto bytes = MakeDirectFixture();
+  const auto temp_path =
+      std::filesystem::temp_directory_path() /
+      ("orchard-raw-inspect-" + std::to_string(::GetCurrentProcessId()) + ".img");
+  {
+    std::ofstream output(temp_path, std::ios::binary);
+    output.write(reinterpret_cast<const char*>(bytes.data()),
+                 static_cast<std::streamsize>(bytes.size()));
+  }
+
+  orchard::blockio::InspectionTargetInfo target_info{
+      .path = temp_path,
+      .kind = orchard::blockio::TargetKind::kRawDevice,
+      .exists = true,
+      .probe_candidate = true,
+      .is_regular_file = true,
+      .is_directory = false,
+      .size_bytes = bytes.size(),
+  };
+
+  const auto default_result = orchard::apfs::InspectTarget(target_info);
+  ORCHARD_TEST_REQUIRE(default_result.status == orchard::apfs::InspectionStatus::kSuccess);
+  ORCHARD_TEST_REQUIRE(default_result.report.containers.size() == 1U);
+  ORCHARD_TEST_REQUIRE(default_result.report.containers[0].volumes.size() == 1U);
+  ORCHARD_TEST_REQUIRE(default_result.report.containers[0].volumes[0].root_entries.empty());
+  ORCHARD_TEST_REQUIRE(std::find(default_result.notes.begin(), default_result.notes.end(),
+                                 "Skipped root-directory enrichment for the raw device target to "
+                                 "keep inspection bounded.") != default_result.notes.end());
+
+  const auto enriched_result =
+      orchard::apfs::InspectTarget(target_info, orchard::apfs::InspectionOptions{
+                                                    .enrich_raw_device_volumes = true,
+                                                    .volume_object_id = kVolumeObjectId,
+                                                });
+  ORCHARD_TEST_REQUIRE(enriched_result.status == orchard::apfs::InspectionStatus::kSuccess);
+  ORCHARD_TEST_REQUIRE(enriched_result.report.containers.size() == 1U);
+  ORCHARD_TEST_REQUIRE(enriched_result.report.containers[0].volumes.size() == 1U);
+  ORCHARD_TEST_REQUIRE(!enriched_result.report.containers[0].volumes[0].root_entries.empty());
+  ORCHARD_TEST_REQUIRE(enriched_result.report.containers[0].volumes[0].root_entries[0].name ==
+                       "alpha.txt");
+  ORCHARD_TEST_REQUIRE(std::find(enriched_result.notes.begin(), enriched_result.notes.end(),
+                                 "Enriched the selected raw-device APFS volume on demand.") !=
+                       enriched_result.notes.end());
+
+  std::filesystem::remove(temp_path);
+}
+
+void VolumeContextFallsBackToDirectRootTreeBlockWhenVolumeOmapMisses() {
+  auto bytes = MakeDirectFixture();
+  const auto volume_superblock_offset =
+      static_cast<std::size_t>(kCurrentVolumeBlock * kApfsBlockSize);
+  WriteLe64(bytes, volume_superblock_offset + 0x88U, kFsTreeBlock);
+
+  auto reader = orchard::blockio::MakeMemoryReader(bytes, "direct-root-tree-fallback");
+  auto volume = LoadVolumeContext(*reader);
+
+  const auto entries_result = orchard::apfs::ListDirectory(volume, "/");
+  ORCHARD_TEST_REQUIRE(entries_result.ok());
+  ORCHARD_TEST_REQUIRE(entries_result.value().size() == 4U);
+  ORCHARD_TEST_REQUIRE(entries_result.value()[0].key.name == "alpha.txt");
+}
+
+void VolumeContextFallsBackToDirectVolumeOmapBlockWhenContainerOmapMisses() {
+  auto bytes = MakeDirectFixture();
+  const auto volume_superblock_offset =
+      static_cast<std::size_t>(kCurrentVolumeBlock * kApfsBlockSize);
+  WriteLe64(bytes, volume_superblock_offset + 0x80U, kVolumeOmapBlock);
+
+  auto reader = orchard::blockio::MakeMemoryReader(bytes, "direct-volume-omap-fallback");
+  auto volume = LoadVolumeContext(*reader);
+
+  const auto entries_result = orchard::apfs::ListDirectory(volume, "/");
+  ORCHARD_TEST_REQUIRE(entries_result.ok());
+  ORCHARD_TEST_REQUIRE(entries_result.value().size() == 4U);
+  ORCHARD_TEST_REQUIRE(entries_result.value()[0].key.name == "alpha.txt");
 }
 
 void DiscoversDirectContainerAndCheckpoint() {
@@ -882,6 +1516,17 @@ void FileReadPathHandlesPlainSparseCompressedAndEmptyFiles() {
       orchard::apfs::ReadWholeFile(volume, empty_lookup.value().inode.key.header.object_id);
   ORCHARD_TEST_REQUIRE(empty_bytes.ok());
   ORCHARD_TEST_REQUIRE(empty_bytes.value().empty());
+}
+
+void DirectoryMetadataIgnoresCompressionXattrParsing() {
+  auto reader = orchard::blockio::MakeMemoryReader(
+      MakeDirectFixtureWithDirectoryCompressionXattrRegression(), "directory-metadata-fixture");
+  auto volume = LoadVolumeContext(*reader);
+
+  const auto metadata_result = orchard::apfs::GetFileMetadata(volume, kRootInodeId);
+  ORCHARD_TEST_REQUIRE(metadata_result.ok());
+  ORCHARD_TEST_REQUIRE(metadata_result.value().kind == orchard::apfs::InodeKind::kDirectory);
+  ORCHARD_TEST_REQUIRE(metadata_result.value().child_count == 4U);
 }
 
 void PolicyEngineClassifiesSyntheticVolumes() {
@@ -1058,6 +1703,41 @@ void WinFspDirectoryQueryFiltersDeterministically() {
                                     });
   ORCHARD_TEST_REQUIRE(pattern_filtered.size() == 1U);
   ORCHARD_TEST_REQUIRE(pattern_filtered[0].file_name == L"alpha.txt");
+
+  std::filesystem::remove(temp_path);
+}
+
+void WinFspDirectoryQuerySurvivesUnreadableChildMetadata() {
+  const auto temp_path =
+      std::filesystem::temp_directory_path() / "orchard_apfs_query_dir_unreadable_child.img";
+  const auto bytes = MakeDirectFixtureWithUnreadableChildMetadata();
+
+  {
+    std::ofstream output(temp_path, std::ios::binary);
+    output.write(reinterpret_cast<const char*>(bytes.data()),
+                 static_cast<std::streamsize>(bytes.size()));
+  }
+
+  orchard::fs_winfsp::MountConfig config;
+  config.target_path = temp_path;
+  config.mount_point = L"T:";
+
+  const auto mounted_volume_result = orchard::fs_winfsp::OpenMountedVolume(config);
+  ORCHARD_TEST_REQUIRE(mounted_volume_result.ok());
+
+  const auto root_result = mounted_volume_result.value()->ResolveFileNode("/");
+  ORCHARD_TEST_REQUIRE(root_result.ok());
+  const auto entries_result =
+      mounted_volume_result.value()->ListDirectoryEntries(root_result.value().inode_id);
+  ORCHARD_TEST_REQUIRE(entries_result.ok());
+
+  const auto query_entries_result = orchard::fs_winfsp::BuildDirectoryQueryEntries(
+      mounted_volume_result.value()->volume_context(), root_result.value(), entries_result.value());
+  ORCHARD_TEST_REQUIRE(query_entries_result.ok());
+  ORCHARD_TEST_REQUIRE(query_entries_result.value().size() == 4U);
+  ORCHARD_TEST_REQUIRE(query_entries_result.value()[1].file_name == L"compressed.txt");
+  ORCHARD_TEST_REQUIRE(
+      (query_entries_result.value()[1].file_info.file_attributes & FILE_ATTRIBUTE_DIRECTORY) == 0U);
 
   std::filesystem::remove(temp_path);
 }
@@ -1386,21 +2066,41 @@ int main() {
   return orchard_test::RunTests({
       {"DetectsNxsbMagicAtObjectOffset", &DetectsNxsbMagicAtObjectOffset},
       {"ParsesObjectHeaderAndRejectsShortBlock", &ParsesObjectHeaderAndRejectsShortBlock},
+      {"ParseInodeRecordSupportsRealApfsLayout", &ParseInodeRecordSupportsRealApfsLayout},
+      {"ParseDirectoryRecordKeySupportsHashedRealLayout",
+       &ParseDirectoryRecordKeySupportsHashedRealLayout},
       {"ParsesLeafAndInternalBtreeNodes", &ParsesLeafAndInternalBtreeNodes},
+      {"BtreeWalkerResolvesChildIdentifiersThroughCallback",
+       &BtreeWalkerResolvesChildIdentifiersThroughCallback},
+      {"BtreeWalkerLowerBoundAndVisitRangeWorkAcrossMultipleLeaves",
+       &BtreeWalkerLowerBoundAndVisitRangeWorkAcrossMultipleLeaves},
       {"OmapLookupExactAndOlderFallback", &OmapLookupExactAndOlderFallback},
       {"OmapLookupRejectsDeletedMapping", &OmapLookupRejectsDeletedMapping},
+      {"VolumeContextBoundedQueriesIgnoreEarlierMalformedLeaves",
+       &VolumeContextBoundedQueriesIgnoreEarlierMalformedLeaves},
+      {"ParsesRealAndLegacyXattrLayouts", &ParsesRealAndLegacyXattrLayouts},
+      {"VolumeContextFallsBackToDirectVolumeOmapBlockWhenContainerOmapMisses",
+       &VolumeContextFallsBackToDirectVolumeOmapBlockWhenContainerOmapMisses},
+      {"VolumeContextFallsBackToDirectRootTreeBlockWhenVolumeOmapMisses",
+       &VolumeContextFallsBackToDirectRootTreeBlockWhenVolumeOmapMisses},
       {"DiscoversDirectContainerAndCheckpoint", &DiscoversDirectContainerAndCheckpoint},
       {"DiscoversGptWrappedContainer", &DiscoversGptWrappedContainer},
       {"VolumePathLookupAndDirectoryEnumerationWork", &VolumePathLookupAndDirectoryEnumerationWork},
       {"FileReadPathHandlesPlainSparseCompressedAndEmptyFiles",
        &FileReadPathHandlesPlainSparseCompressedAndEmptyFiles},
+      {"DirectoryMetadataIgnoresCompressionXattrParsing",
+       &DirectoryMetadataIgnoresCompressionXattrParsing},
       {"PolicyEngineClassifiesSyntheticVolumes", &PolicyEngineClassifiesSyntheticVolumes},
       {"InspectTargetUsesRealReaderPathAndEnrichesOutput",
        &InspectTargetUsesRealReaderPathAndEnrichesOutput},
+      {"RawDeviceInspectionCanEnrichSelectedVolumeOnDemand",
+       &RawDeviceInspectionCanEnrichSelectedVolumeOnDemand},
       {"WinFspPathBridgeNormalizesPaths", &WinFspPathBridgeNormalizesPaths},
       {"WinFspFileInfoUsesApfsMetadata", &WinFspFileInfoUsesApfsMetadata},
       {"WinFspDirectoryQueryFiltersDeterministically",
        &WinFspDirectoryQueryFiltersDeterministically},
+      {"WinFspDirectoryQuerySurvivesUnreadableChildMetadata",
+       &WinFspDirectoryQuerySurvivesUnreadableChildMetadata},
       {"WinFspMountedVolumeReusesOpenNodeIdentity", &WinFspMountedVolumeReusesOpenNodeIdentity},
       {"LargeFixtureSupportsLargeDirectoryPathLookupAndFileRead",
        &LargeFixtureSupportsLargeDirectoryPathLookupAndFileRead},

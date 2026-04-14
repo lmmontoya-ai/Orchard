@@ -93,7 +93,8 @@ public:
   }
 };
 
-KnownDeviceRecord MakeProbeFailureRecord(const DeviceInterfaceInfo& device, const blockio::Error& error) {
+KnownDeviceRecord MakeProbeFailureRecord(const DeviceInterfaceInfo& device,
+                                         const blockio::Error& error) {
   KnownDeviceRecord record;
   record.device_path = device.device_path;
   record.target_info = blockio::InspectTargetPath(device.device_path);
@@ -108,9 +109,11 @@ void CopyRetainedMountBindings(const std::optional<KnownDeviceRecord>& existing_
   }
 
   for (auto& volume : candidate_record->volumes) {
-    const auto existing_volume = std::find_if(
-        existing_record->volumes.begin(), existing_record->volumes.end(),
-        [&volume](const KnownVolumeRecord& current) { return current.object_id == volume.object_id; });
+    const auto existing_volume =
+        std::find_if(existing_record->volumes.begin(), existing_record->volumes.end(),
+                     [&volume](const KnownVolumeRecord& current) {
+                       return current.object_id == volume.object_id;
+                     });
     if (existing_volume != existing_record->volumes.end()) {
       volume.mount = existing_volume->mount;
     }
@@ -138,15 +141,15 @@ bool ContainsPath(const std::vector<std::wstring>& paths, const std::wstring_vie
 
 DeviceDiscoveryManager::DeviceDiscoveryManager(
     std::unique_ptr<DeviceMonitor> monitor, std::unique_ptr<DeviceEnumerator> enumerator,
-    std::unique_ptr<DeviceProber> prober, std::unique_ptr<MountPointAllocator> mount_point_allocator,
-    DeviceDiscoveryCallbacks callbacks)
+    std::unique_ptr<DeviceProber> prober,
+    std::unique_ptr<MountPointAllocator> mount_point_allocator, DeviceDiscoveryCallbacks callbacks)
     : monitor_(std::move(monitor)), enumerator_(std::move(enumerator)), prober_(std::move(prober)),
       mount_point_allocator_(std::move(mount_point_allocator)), callbacks_(std::move(callbacks)),
       coordinator_(callbacks_.post_task, [this]() { Reconcile(); }) {}
 
 blockio::Result<std::monostate> DeviceDiscoveryManager::Start() {
-  auto start_result = monitor_->Start(
-      [this](const DeviceMonitorEvent& event) { HandleMonitorEvent(event); });
+  auto start_result =
+      monitor_->Start([this](const DeviceMonitorEvent& event) { HandleMonitorEvent(event); });
   if (!start_result.ok()) {
     return start_result.error();
   }
@@ -181,13 +184,13 @@ void DeviceDiscoveryManager::HandleMonitorEvent(const DeviceMonitorEvent& event)
   case DeviceMonitorEventKind::kInterfaceChange:
     break;
   case DeviceMonitorEventKind::kMountedDeviceQueryRemoveFailed:
-    suppressed_mount_paths_.erase(
-        std::remove_if(suppressed_mount_paths_.begin(), suppressed_mount_paths_.end(),
-                       [&event](const std::wstring& path) {
-                         return NormalizeDevicePathKey(path) ==
-                                NormalizeDevicePathKey(event.device_path);
-                       }),
-        suppressed_mount_paths_.end());
+    suppressed_mount_paths_.erase(std::remove_if(suppressed_mount_paths_.begin(),
+                                                 suppressed_mount_paths_.end(),
+                                                 [&event](const std::wstring& path) {
+                                                   return NormalizeDevicePathKey(path) ==
+                                                          NormalizeDevicePathKey(event.device_path);
+                                                 }),
+                                  suppressed_mount_paths_.end());
     break;
   }
 
@@ -249,13 +252,13 @@ void DeviceDiscoveryManager::RemoveMissingDevices(const DeviceInventoryDiff& dif
     (void)inventory_.RemoveDevice(device_path);
     {
       std::scoped_lock lock(event_mutex_);
-      suppressed_mount_paths_.erase(
-          std::remove_if(suppressed_mount_paths_.begin(), suppressed_mount_paths_.end(),
-                         [&device_path](const std::wstring& path) {
-                           return NormalizeDevicePathKey(path) ==
-                                  NormalizeDevicePathKey(device_path);
-                         }),
-          suppressed_mount_paths_.end());
+      suppressed_mount_paths_.erase(std::remove_if(suppressed_mount_paths_.begin(),
+                                                   suppressed_mount_paths_.end(),
+                                                   [&device_path](const std::wstring& path) {
+                                                     return NormalizeDevicePathKey(path) ==
+                                                            NormalizeDevicePathKey(device_path);
+                                                   }),
+                                    suppressed_mount_paths_.end());
     }
   }
 }
@@ -268,8 +271,9 @@ bool DeviceDiscoveryManager::ShouldAutoMount(const KnownVolumeRecord& volume) no
 void DeviceDiscoveryManager::ReconcilePresentDevice(const DeviceInterfaceInfo& device) {
   auto existing_record = inventory_.FindDevice(device.device_path);
   auto probe_result = ProbeDevice(device);
-  KnownDeviceRecord candidate_record = probe_result.ok() ? std::move(probe_result.value())
-                                                         : MakeProbeFailureRecord(device, probe_result.error());
+  KnownDeviceRecord candidate_record = probe_result.ok()
+                                           ? std::move(probe_result.value())
+                                           : MakeProbeFailureRecord(device, probe_result.error());
 
   std::vector<std::wstring> mount_ids_to_remove;
   if (existing_record.has_value()) {
@@ -278,12 +282,13 @@ void DeviceDiscoveryManager::ReconcilePresentDevice(const DeviceInterfaceInfo& d
         continue;
       }
 
-      const auto matching_candidate = std::find_if(
-          candidate_record.volumes.begin(), candidate_record.volumes.end(),
-          [&volume](const KnownVolumeRecord& candidate_volume) {
-            return candidate_volume.object_id == volume.object_id;
-          });
-      if (matching_candidate == candidate_record.volumes.end() || !ShouldAutoMount(*matching_candidate)) {
+      const auto matching_candidate =
+          std::find_if(candidate_record.volumes.begin(), candidate_record.volumes.end(),
+                       [&volume](const KnownVolumeRecord& candidate_volume) {
+                         return candidate_volume.object_id == volume.object_id;
+                       });
+      if (matching_candidate == candidate_record.volumes.end() ||
+          !ShouldAutoMount(*matching_candidate)) {
         mount_ids_to_remove.push_back(volume.mount->mount_id);
       }
     }
@@ -314,9 +319,11 @@ void DeviceDiscoveryManager::ReconcilePresentDevice(const DeviceInterfaceInfo& d
       continue;
     }
 
-    auto mount_point_result =
-        mount_point_allocator_->Allocate(updated_record->device_path, volume, inventory_.ActiveMountPoints());
+    auto mount_point_result = mount_point_allocator_->Allocate(updated_record->device_path, volume,
+                                                               inventory_.ActiveMountPoints());
     if (!mount_point_result.ok()) {
+      inventory_.SetMountError(updated_record->device_path, volume.object_id,
+                               mount_point_result.error());
       continue;
     }
 
@@ -336,6 +343,7 @@ void DeviceDiscoveryManager::ReconcilePresentDevice(const DeviceInterfaceInfo& d
             },
     });
     if (!mount_result.ok()) {
+      inventory_.SetMountError(updated_record->device_path, volume.object_id, mount_result.error());
       continue;
     }
 

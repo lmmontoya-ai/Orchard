@@ -7,6 +7,7 @@ add_library(
     src/file_read.cpp
     src/fs_keys.cpp
     src/fs_records.cpp
+    src/fs_search.cpp
     src/format.cpp
     src/inspection.cpp
     src/link_read.cpp

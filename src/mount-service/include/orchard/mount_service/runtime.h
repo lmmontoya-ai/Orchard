@@ -39,6 +39,7 @@ public:
   [[nodiscard]] blockio::Result<MountedSessionRecord> MountVolume(const MountRequest& request);
   [[nodiscard]] blockio::Result<std::monostate> UnmountVolume(const UnmountRequest& request);
   [[nodiscard]] blockio::Result<std::vector<MountedSessionRecord>> ListMounts();
+  [[nodiscard]] blockio::Result<std::vector<KnownDeviceRecord>> ListDevices();
 
   [[nodiscard]] ServiceStateSnapshot state() const noexcept;
   [[nodiscard]] std::wstring_view service_name() const noexcept {

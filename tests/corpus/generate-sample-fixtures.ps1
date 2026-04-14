@@ -167,6 +167,17 @@ def fs_header_value(object_id, record_type): return object_id | (record_type << 
 def inode_key(object_id): return struct.pack("<Q", fs_header_value(object_id, FS_TYPE_INODE))
 def named_key(object_id, record_type, name): return struct.pack("<QH", fs_header_value(object_id, record_type), len(name)) + name.encode("ascii")
 def extent_key(object_id, logical): return struct.pack("<QQ", fs_header_value(object_id, FS_TYPE_FILE_EXTENT), logical)
+def fs_record_sort_key(record):
+    key = record[0]
+    raw_header = struct.unpack_from("<Q", key, 0)[0]
+    object_id = raw_header & 0x0FFFFFFFFFFFFFFF
+    record_type = (raw_header >> 60) & 0x0F
+    if record_type == FS_TYPE_FILE_EXTENT and len(key) >= 16:
+        return (object_id, record_type, struct.unpack_from("<Q", key, 8)[0], b"")
+    if record_type in (FS_TYPE_DIR_REC, FS_TYPE_XATTR) and len(key) >= 10:
+        name_length = struct.unpack_from("<H", key, 8)[0]
+        return (object_id, record_type, 0, key[10:10 + name_length])
+    return (object_id, record_type, 0, b"")
 DEFAULT_TIMESTAMP_NS = 1704067200000000000
 def inode_value(parent_id, logical_size, allocated_size, flags, child_count, mode, link_count=1,
                 creation_time_ns=DEFAULT_TIMESTAMP_NS, access_time_ns=None,
@@ -307,7 +318,7 @@ def volume_superblock(buf, base, xid, incompat, role, name):
     w16(buf, base + 0x3C4, role)
 
 def build_records():
-    return [
+    records = [
         (inode_key(ROOT_INODE_ID), inode_value(ROOT_INODE_ID, 0, 0, 0, 4, 0x4000)),
         (inode_key(ALPHA_INODE_ID), inode_value(ROOT_INODE_ID, len(ALPHA_EXTENT1)+len(ALPHA_EXTENT2), len(ALPHA_EXTENT1)+len(ALPHA_EXTENT2), 0, 0, 0x8000)),
         (inode_key(DOCS_INODE_ID), inode_value(ROOT_INODE_ID, 0, 0, 0, 2, 0x4000)),
@@ -328,6 +339,7 @@ def build_records():
         (extent_key(SPARSE_INODE_ID, 8), extent_value(len(SPARSE_EXTENT2), SPARSE_DATA_BLOCK2)),
         (named_key(COMPRESSED_INODE_ID, FS_TYPE_XATTR, "com.apple.decmpfs"), xattr_value(compression_payload(COMPRESSED_TEXT))),
     ]
+    return sorted(records, key=fs_record_sort_key)
 
 def build_direct(volume_name="Orchard Data", incompat=VOL_INCOMPAT_CASE_INSENSITIVE, role=VOL_ROLE_DATA, delete_latest=False):
     buf = bytearray(APFS_BLOCK_SIZE * BLOCK_COUNT)
@@ -442,7 +454,7 @@ def build_explorer_stress():
         records.append((named_key(bulk_dir_inode_id, FS_TYPE_DIR_REC, bulk_name(index)),
                         dir_value(inode_id)))
 
-    sorted_records = sorted(records, key=lambda record: record[0])
+    sorted_records = sorted(records, key=fs_record_sort_key)
     leaf_chunks = split_variable_records(sorted_records)
     if len(leaf_chunks) > (copy_data_blocks[0] - fs_tree_leaf_start_block):
         raise RuntimeError("Explorer stress fixture exceeded the reserved metadata leaf range.")
@@ -530,7 +542,7 @@ def build_link_behavior():
         (extent_key(hard_link_inode_id, 0), extent_value(len(hard_link_text), hard_link_data_block)),
     ]
 
-    sorted_records = sorted(records, key=lambda record: record[0])
+    sorted_records = sorted(records, key=fs_record_sort_key)
     buf = bytearray(APFS_BLOCK_SIZE * block_count)
     nxsb(buf, 0, 1, block_count)
     nxsb(buf, APFS_BLOCK_SIZE, CURRENT_CHECKPOINT_XID, block_count)

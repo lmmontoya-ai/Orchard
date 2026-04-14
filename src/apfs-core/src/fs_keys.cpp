@@ -5,6 +5,7 @@ namespace {
 
 constexpr std::uint64_t kFsKeyObjectIdMask = 0x0FFFFFFFFFFFFFFFULL;
 constexpr std::uint64_t kFsKeyTypeShift = 60U;
+constexpr std::uint32_t kDirRecordNameLengthMask = 0x000003FFU;
 
 blockio::Result<std::string> ParseNamedKeyString(const std::span<const std::uint8_t> bytes,
                                                  const std::string_view label) {
@@ -21,6 +22,21 @@ blockio::Result<std::string> ParseNamedKeyString(const std::span<const std::uint
   }
 
   return DecodeUtf8Name(bytes.subspan(10U, length));
+}
+
+blockio::Result<std::string>
+ParseHashedDirectoryKeyString(const std::span<const std::uint8_t> bytes) {
+  if (!HasRange(bytes, 8U, 4U)) {
+    return MakeApfsError(blockio::ErrorCode::kCorruptData,
+                         "Directory record key is too small for the APFS hashed name field.");
+  }
+
+  const auto length = ReadLe32(bytes, 8U) & kDirRecordNameLengthMask;
+  if (!HasRange(bytes, 12U, length)) {
+    return MakeApfsError(blockio::ErrorCode::kCorruptData,
+                         "Directory record key name extends beyond the record bytes.");
+  }
+  return DecodeUtf8Name(bytes.subspan(12U, length));
 }
 
 } // namespace
@@ -63,6 +79,9 @@ ParseDirectoryRecordKey(const std::span<const std::uint8_t> bytes) {
   }
 
   auto name_result = ParseNamedKeyString(bytes, "directory record");
+  if (!name_result.ok() && bytes.size() >= 13U) {
+    name_result = ParseHashedDirectoryKeyString(bytes);
+  }
   if (!name_result.ok()) {
     return name_result.error();
   }

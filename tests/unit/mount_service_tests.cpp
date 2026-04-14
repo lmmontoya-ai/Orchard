@@ -174,9 +174,13 @@ struct FakeMountOps {
   std::vector<orchard::mount_service::MountRequest> mount_requests;
   std::vector<std::wstring> unmount_ids;
   int next_mount_ordinal = 1;
+  std::optional<orchard::blockio::Error> mount_error_override;
 
   [[nodiscard]] orchard::blockio::Result<orchard::mount_service::MountedSessionRecord>
   Mount(const orchard::mount_service::MountRequest& request) {
+    if (mount_error_override.has_value()) {
+      return *mount_error_override;
+    }
     mount_requests.push_back(request);
     return orchard::mount_service::MountedSessionRecord{
         .mount_id = L"auto-" + std::to_wstring(next_mount_ordinal++),
@@ -274,6 +278,7 @@ orchard::mount_service::KnownDeviceRecord MakeMountedCandidateDevice(std::wstrin
       .policy_reasons = {},
       .policy_summary = "Readable and mountable for Orchard M3 tests.",
       .mount = std::nullopt,
+      .mount_error = std::nullopt,
   });
   return record;
 }
@@ -368,6 +373,7 @@ void ServiceHostCommandLineParsesConsoleMountOptions() {
       const_cast<char*>("R:"),
       const_cast<char*>("--volume-name"),
       const_cast<char*>("Data"),
+      const_cast<char*>("--diagnose-discovery"),
       const_cast<char*>("--hold-ms"),
       const_cast<char*>("5000"),
   };
@@ -378,6 +384,7 @@ void ServiceHostCommandLineParsesConsoleMountOptions() {
   ORCHARD_TEST_REQUIRE(parse_result.value().mode ==
                        orchard::mount_service::ServiceLaunchMode::kConsole);
   ORCHARD_TEST_REQUIRE(parse_result.value().service.service_name == L"OrchardTestSvc");
+  ORCHARD_TEST_REQUIRE(parse_result.value().diagnose_discovery);
   const auto& startup_mount_optional = parse_result.value().startup_mount;
   if (!startup_mount_optional.has_value()) {
     throw orchard_test::Failure("startup_mount was not populated.");
@@ -396,6 +403,35 @@ void ServiceHostCommandLineParsesConsoleMountOptions() {
   }
   const auto hold_timeout_ms = *hold_timeout_optional;
   ORCHARD_TEST_REQUIRE(hold_timeout_ms == 5000U);
+}
+
+void ServiceHostCommandLineParsesInstallStartupMountOptions() {
+  std::vector<char*> argv{
+      const_cast<char*>("orchard-service-host"),
+      const_cast<char*>("--install"),
+      const_cast<char*>("--service-name"),
+      const_cast<char*>("OrchardInstallSvc"),
+      const_cast<char*>("--target"),
+      const_cast<char*>(R"(C:\fixtures\plain-user-data.img)"),
+      const_cast<char*>("--mountpoint"),
+      const_cast<char*>("R:"),
+      const_cast<char*>("--volume-oid"),
+      const_cast<char*>("1026"),
+  };
+
+  auto parse_result = orchard::mount_service::ParseServiceHostCommandLine(
+      static_cast<int>(argv.size()), argv.data());
+  ORCHARD_TEST_REQUIRE(parse_result.ok());
+  ORCHARD_TEST_REQUIRE(parse_result.value().mode ==
+                       orchard::mount_service::ServiceLaunchMode::kInstall);
+  ORCHARD_TEST_REQUIRE(parse_result.value().service.service_name == L"OrchardInstallSvc");
+  ORCHARD_TEST_REQUIRE(parse_result.value().startup_mount.has_value());
+
+  const auto& startup_mount = *parse_result.value().startup_mount;
+  ORCHARD_TEST_REQUIRE(startup_mount.config.target_path == R"(C:\fixtures\plain-user-data.img)");
+  ORCHARD_TEST_REQUIRE(startup_mount.config.mount_point == L"R:");
+  ORCHARD_TEST_REQUIRE(startup_mount.config.selector.object_id.has_value());
+  ORCHARD_TEST_REQUIRE(*startup_mount.config.selector.object_id == 1026U);
 }
 
 void DeviceInventoryDiffsAddedAndRemovedPaths() {
@@ -642,6 +678,53 @@ void DeviceDiscoveryManagerQueryRemoveSuppresssImmediateRemountUntilFailureClear
   ORCHARD_TEST_REQUIRE(mount_ops.mount_requests.size() == 2U);
 }
 
+void DeviceDiscoveryManagerRecordsMountFailuresOnKnownVolume() {
+  auto poster = std::make_shared<FakePosterState>();
+  auto monitor = std::make_unique<FakeDeviceMonitor>();
+  auto enumerator = std::make_unique<FakeDeviceEnumerator>(
+      std::vector<orchard::mount_service::DeviceInterfaceInfo>{
+          orchard::mount_service::DeviceInterfaceInfo{.device_path = LR"(\\.\PhysicalDrive13)"},
+      });
+  auto prober = std::make_unique<FakeDeviceProber>();
+  prober->SetResult(LR"(\\.\PhysicalDrive13)", FakeDeviceProber::ProbeEntry{
+                                                   .record = MakeMountedCandidateDevice(
+                                                       LR"(\\.\PhysicalDrive13)", 13U, "Failure"),
+                                                   .error = std::nullopt,
+                                               });
+  auto allocator = std::make_unique<FakeMountPointAllocator>();
+  allocator->PushMountPoint(L"R:");
+  FakeMountOps mount_ops;
+  mount_ops.mount_error_override = orchard::mount_service::MakeMountServiceError(
+      orchard::blockio::ErrorCode::kOpenFailed, "Synthetic mount failure.");
+
+  orchard::mount_service::DeviceDiscoveryManager manager(
+      std::move(monitor), std::move(enumerator), std::move(prober), std::move(allocator),
+      orchard::mount_service::DeviceDiscoveryCallbacks{
+          .post_task =
+              [poster](std::function<void()> task) { return poster->Post(std::move(task)); },
+          .mount_volume =
+              [&mount_ops](const orchard::mount_service::MountRequest& request) {
+                return mount_ops.Mount(request);
+              },
+          .unmount_volume =
+              [&mount_ops](const orchard::mount_service::UnmountRequest& request) {
+                return mount_ops.Unmount(request);
+              },
+      });
+
+  auto start_result = manager.Start();
+  ORCHARD_TEST_REQUIRE(start_result.ok());
+  poster->RunAll();
+
+  const auto devices = manager.ListDevices();
+  ORCHARD_TEST_REQUIRE(devices.size() == 1U);
+  ORCHARD_TEST_REQUIRE(devices.front().volumes.size() == 1U);
+  ORCHARD_TEST_REQUIRE(!devices.front().volumes.front().mount.has_value());
+  ORCHARD_TEST_REQUIRE(devices.front().volumes.front().mount_error.has_value());
+  ORCHARD_TEST_REQUIRE(devices.front().volumes.front().mount_error->message ==
+                       "Synthetic mount failure.");
+}
+
 } // namespace
 
 int main() {
@@ -654,6 +737,8 @@ int main() {
        &ServiceRuntimeStopIsIdempotentAndStopsMountedSessions},
       {"ServiceHostCommandLineParsesConsoleMountOptions",
        &ServiceHostCommandLineParsesConsoleMountOptions},
+      {"ServiceHostCommandLineParsesInstallStartupMountOptions",
+       &ServiceHostCommandLineParsesInstallStartupMountOptions},
       {"DeviceInventoryDiffsAddedAndRemovedPaths", &DeviceInventoryDiffsAddedAndRemovedPaths},
       {"RescanCoordinatorCoalescesBurstRequests", &RescanCoordinatorCoalescesBurstRequests},
       {"DeviceDiscoveryManagerStartupEnumeratesAndMountsSupportedVolume",
@@ -664,5 +749,7 @@ int main() {
        &DeviceDiscoveryManagerBurstEventsDoNotDuplicateMounts},
       {"DeviceDiscoveryManagerQueryRemoveSuppresssImmediateRemountUntilFailureClearsIt",
        &DeviceDiscoveryManagerQueryRemoveSuppresssImmediateRemountUntilFailureClearsIt},
+      {"DeviceDiscoveryManagerRecordsMountFailuresOnKnownVolume",
+       &DeviceDiscoveryManagerRecordsMountFailuresOnKnownVolume},
   });
 }

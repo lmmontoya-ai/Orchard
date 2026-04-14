@@ -27,6 +27,14 @@ std::string ComposeChildPath(const ChildPathRequest& request) {
   return path;
 }
 
+orchard::apfs::FileMetadata
+MakeFallbackMetadata(const orchard::apfs::DirectoryEntryRecord& entry) noexcept {
+  orchard::apfs::FileMetadata metadata;
+  metadata.object_id = entry.file_id;
+  metadata.kind = entry.kind;
+  return metadata;
+}
+
 } // namespace
 
 blockio::Result<std::vector<DirectoryQueryEntry>>
@@ -42,11 +50,6 @@ BuildDirectoryQueryEntries(const orchard::apfs::VolumeContext& volume,
   query_entries.reserve(entries.size());
 
   for (const auto& entry : entries) {
-    auto metadata_result = orchard::apfs::GetFileMetadata(volume, entry.file_id);
-    if (!metadata_result.ok()) {
-      return metadata_result.error();
-    }
-
     FileNode node;
     node.inode_id = entry.file_id;
     node.parent_inode_id = directory_node.inode_id;
@@ -54,7 +57,8 @@ BuildDirectoryQueryEntries(const orchard::apfs::VolumeContext& volume,
         .parent = directory_node.normalized_path,
         .child = entry.key.name,
     });
-    node.metadata = metadata_result.value();
+    auto metadata_result = orchard::apfs::GetFileMetadata(volume, entry.file_id);
+    node.metadata = metadata_result.ok() ? metadata_result.value() : MakeFallbackMetadata(entry);
 
     auto wide_name_result = Utf8ToWide(entry.key.name);
     if (!wide_name_result.ok()) {

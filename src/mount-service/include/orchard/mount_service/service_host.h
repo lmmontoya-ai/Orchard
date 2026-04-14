@@ -21,6 +21,7 @@ struct ServiceHostOptions {
   std::optional<MountRequest> startup_mount;
   std::optional<std::uint32_t> hold_timeout_ms;
   std::optional<std::wstring> shutdown_event_name;
+  bool diagnose_discovery = false;
 };
 
 [[nodiscard]] blockio::Result<ServiceHostOptions> ParseServiceHostCommandLine(int argc,

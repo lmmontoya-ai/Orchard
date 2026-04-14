@@ -26,6 +26,7 @@ struct KnownVolumeRecord {
   std::vector<std::string> policy_reasons;
   std::string policy_summary;
   std::optional<MountedVolumeBinding> mount;
+  std::optional<blockio::Error> mount_error;
 };
 
 struct KnownDeviceRecord {
@@ -55,6 +56,8 @@ public:
 
   void AttachMount(std::wstring_view device_path, std::uint64_t volume_object_id,
                    const MountedVolumeBinding& binding);
+  void SetMountError(std::wstring_view device_path, std::uint64_t volume_object_id,
+                     const blockio::Error& error);
   void DetachMountById(std::wstring_view mount_id);
 
   [[nodiscard]] std::size_t MountedVolumeCountForDevice(std::wstring_view device_path) const;

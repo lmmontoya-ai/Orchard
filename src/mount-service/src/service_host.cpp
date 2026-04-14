@@ -13,6 +13,7 @@
 #include <string_view>
 #include <utility>
 
+#include "orchard/blockio/error.h"
 #include "orchard/fs_winfsp/path_bridge.h"
 #include "orchard/mount_service/runtime.h"
 
@@ -117,20 +118,53 @@ ParseWideArgument(const ParseWideArgumentRequest& request) {
   return path;
 }
 
-[[nodiscard]] blockio::Result<std::wstring> BuildServiceBinaryPath(const ServiceConfig& config) {
+void AppendCommandLineArgument(std::wstring& command_line, const std::wstring_view argument) {
+  command_line += L" \"";
+  command_line += argument;
+  command_line += L"\"";
+}
+
+[[nodiscard]] blockio::Result<std::wstring>
+BuildServiceBinaryPath(const ServiceHostOptions& options) {
   auto executable_path_result = CurrentExecutablePath();
   if (!executable_path_result.ok()) {
     return executable_path_result.error();
   }
 
   std::wstring command_line = L"\"" + executable_path_result.value() + L"\"";
-  if (config.service_name != kDefaultServiceName) {
-    command_line += L" --service-name \"" + config.service_name + L"\"";
+  if (options.service.service_name != kDefaultServiceName) {
+    command_line += L" --service-name";
+    AppendCommandLineArgument(command_line, options.service.service_name);
+  }
+
+  if (options.startup_mount.has_value()) {
+    command_line += L" --target";
+    AppendCommandLineArgument(command_line, options.startup_mount->config.target_path.wstring());
+    command_line += L" --mountpoint";
+    AppendCommandLineArgument(command_line, options.startup_mount->config.mount_point);
+
+    if (options.startup_mount->config.selector.name.has_value()) {
+      auto wide_name_result =
+          orchard::fs_winfsp::Utf8ToWide(*options.startup_mount->config.selector.name);
+      if (!wide_name_result.ok()) {
+        return MakeMountServiceError(blockio::ErrorCode::kInvalidArgument,
+                                     "Invalid UTF-8 provided for --volume-name.");
+      }
+      command_line += L" --volume-name";
+      AppendCommandLineArgument(command_line, wide_name_result.value());
+    }
+
+    if (options.startup_mount->config.selector.object_id.has_value()) {
+      command_line += L" --volume-oid";
+      AppendCommandLineArgument(command_line,
+                                std::to_wstring(*options.startup_mount->config.selector.object_id));
+    }
   }
   return command_line;
 }
 
-[[nodiscard]] blockio::Result<std::monostate> InstallServiceBinary(const ServiceConfig& config) {
+[[nodiscard]] blockio::Result<std::monostate>
+InstallServiceBinary(const ServiceHostOptions& options) {
   ScopedScHandle service_manager(
       ::OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT | SC_MANAGER_CREATE_SERVICE));
   if (!service_manager) {
@@ -139,22 +173,23 @@ ParseWideArgument(const ParseWideArgumentRequest& request) {
                                  ::GetLastError());
   }
 
-  auto binary_path_result = BuildServiceBinaryPath(config);
+  auto binary_path_result = BuildServiceBinaryPath(options);
   if (!binary_path_result.ok()) {
     return binary_path_result.error();
   }
 
   ScopedScHandle service(::CreateServiceW(
-      service_manager.get(), config.service_name.c_str(), config.display_name.c_str(),
-      SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START, SERVICE_ERROR_NORMAL,
-      binary_path_result.value().c_str(), nullptr, nullptr, nullptr, nullptr, nullptr));
+      service_manager.get(), options.service.service_name.c_str(),
+      options.service.display_name.c_str(), SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS,
+      SERVICE_AUTO_START, SERVICE_ERROR_NORMAL, binary_path_result.value().c_str(), nullptr,
+      nullptr, nullptr, nullptr, nullptr));
   if (!service) {
     return MakeMountServiceError(blockio::ErrorCode::kOpenFailed,
                                  "Failed to create the Orchard Windows service.", ::GetLastError());
   }
 
   SERVICE_DESCRIPTIONW description{
-      .lpDescription = const_cast<LPWSTR>(config.description.c_str()),
+      .lpDescription = const_cast<LPWSTR>(options.service.description.c_str()),
   };
   if (!::ChangeServiceConfig2W(service.get(), SERVICE_CONFIG_DESCRIPTION, &description)) {
     return MakeMountServiceError(blockio::ErrorCode::kOpenFailed,
@@ -188,6 +223,9 @@ WaitForServiceState(const SC_HANDLE service, const WaitForServiceStateRequest& r
   return MakeMountServiceError(blockio::ErrorCode::kOpenFailed,
                                "Timed out waiting for the Orchard service state transition.");
 }
+
+[[nodiscard]] blockio::Result<std::monostate>
+MaybeMountStartupVolume(ServiceRuntime& runtime, const ServiceHostOptions& options);
 
 [[nodiscard]] blockio::Result<std::monostate> UninstallServiceBinary(const ServiceConfig& config) {
   ScopedScHandle service_manager(::OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT));
@@ -225,14 +263,14 @@ WaitForServiceState(const SC_HANDLE service, const WaitForServiceStateRequest& r
 
 class WindowsServiceHost {
 public:
-  explicit WindowsServiceHost(ServiceConfig config) : config_(std::move(config)) {}
+  explicit WindowsServiceHost(ServiceHostOptions options) : options_(std::move(options)) {}
 
   int RunDispatcher() {
     active_instance_ = this;
 
     SERVICE_TABLE_ENTRYW service_table[] = {
         {
-            .lpServiceName = config_.service_name.data(),
+            .lpServiceName = options_.service.service_name.data(),
             .lpServiceProc = &WindowsServiceHost::ServiceMainThunk,
         },
         {
@@ -284,18 +322,27 @@ private:
     (void)argv;
 
     status_handle_ = ::RegisterServiceCtrlHandlerExW(
-        config_.service_name.c_str(), &WindowsServiceHost::ControlHandlerThunk, this);
+        options_.service.service_name.c_str(), &WindowsServiceHost::ControlHandlerThunk, this);
     if (status_handle_ == nullptr) {
       exit_code_ = 1;
       return;
     }
 
     runtime_ = std::make_unique<ServiceRuntime>(
-        config_, CreateDefaultMountSessionFactory(),
+        options_.service, CreateDefaultMountSessionFactory(),
         [this](const ServiceStateSnapshot& snapshot) { ReportState(snapshot, NO_ERROR); });
 
     auto start_result = runtime_->Start();
     if (!start_result.ok()) {
+      ReportState(ServiceStateSnapshot{.state = ServiceState::kStopped},
+                  ERROR_SERVICE_SPECIFIC_ERROR);
+      exit_code_ = 1;
+      return;
+    }
+
+    auto mount_result = MaybeMountStartupVolume(*runtime_, options_);
+    if (!mount_result.ok()) {
+      runtime_->Stop();
       ReportState(ServiceStateSnapshot{.state = ServiceState::kStopped},
                   ERROR_SERVICE_SPECIFIC_ERROR);
       exit_code_ = 1;
@@ -366,7 +413,7 @@ private:
 
   inline static WindowsServiceHost* active_instance_ = nullptr;
 
-  ServiceConfig config_;
+  ServiceHostOptions options_;
   SERVICE_STATUS_HANDLE status_handle_ = nullptr;
   std::unique_ptr<ServiceRuntime> runtime_;
   int exit_code_ = 0;
@@ -436,6 +483,60 @@ WaitForConsoleShutdown(ServiceRuntime& runtime, const ServiceHostOptions& option
   return std::monostate{};
 }
 
+void PrintDiscoveryDiagnostics(ServiceRuntime& runtime) {
+  ::Sleep(1000);
+
+  const auto devices_result = runtime.ListDevices();
+  if (!devices_result.ok()) {
+    std::cerr << "Failed to list discovered devices: " << devices_result.error().message << "\n";
+    return;
+  }
+
+  const auto mounts_result = runtime.ListMounts();
+  if (!mounts_result.ok()) {
+    std::cerr << "Failed to list active mounts: " << mounts_result.error().message << "\n";
+    return;
+  }
+
+  std::wcout << L"Discovery diagnostics:\n";
+  if (devices_result.value().empty()) {
+    std::wcout << L"  devices: none\n";
+  }
+
+  for (const auto& device : devices_result.value()) {
+    std::wcout << L"  device: " << device.device_path << L"\n";
+    if (device.probe_error.has_value()) {
+      std::cout << "    probe_error: " << orchard::blockio::ToString(device.probe_error->code)
+                << " - " << device.probe_error->message << "\n";
+      continue;
+    }
+    if (device.volumes.empty()) {
+      std::wcout << L"    volumes: none\n";
+      continue;
+    }
+    for (const auto& volume : device.volumes) {
+      std::cout << "    volume oid=" << volume.object_id << " name=\"" << volume.name
+                << "\" policy=" << orchard::apfs::ToString(volume.policy_action) << "\n";
+      if (volume.mount.has_value()) {
+        std::wcout << L"      mount: " << volume.mount->mount_point << L" (id="
+                   << volume.mount->mount_id << L")\n";
+      } else {
+        std::wcout << L"      mount: none\n";
+      }
+      if (volume.mount_error.has_value()) {
+        std::cout << "      mount_error: " << orchard::blockio::ToString(volume.mount_error->code)
+                  << " - " << volume.mount_error->message << "\n";
+      }
+    }
+  }
+
+  std::wcout << L"  active mounts: " << mounts_result.value().size() << L"\n";
+  for (const auto& mount : mounts_result.value()) {
+    std::wcout << L"    " << mount.mount_point << L" <- ";
+    std::wcout << mount.target_path.wstring() << L" (id=" << mount.mount_id << L")\n";
+  }
+}
+
 int RunConsoleHost(const ServiceHostOptions& options) {
   ServiceRuntime runtime(options.service);
   auto start_result = runtime.Start();
@@ -453,6 +554,9 @@ int RunConsoleHost(const ServiceHostOptions& options) {
   }
 
   std::wcout << L"Orchard service runtime is running in console mode.\n";
+  if (options.diagnose_discovery) {
+    PrintDiscoveryDiagnostics(runtime);
+  }
   g_console_runtime = &runtime;
   ::SetConsoleCtrlHandler(&ConsoleControlHandler, TRUE);
   const auto wait_result = WaitForConsoleShutdown(runtime, options);
@@ -572,6 +676,10 @@ blockio::Result<ServiceHostOptions> ParseServiceHostCommandLine(const int argc, 
       options.shutdown_event_name = std::move(wide_result.value());
       continue;
     }
+    if (argument == "--diagnose-discovery") {
+      options.diagnose_discovery = true;
+      continue;
+    }
 
     return MakeMountServiceError(blockio::ErrorCode::kInvalidArgument,
                                  "Unknown orchard-service-host argument: " + std::string(argument));
@@ -596,7 +704,7 @@ int RunServiceHost(const ServiceHostOptions& options) {
   case ServiceLaunchMode::kConsole:
     return RunConsoleHost(options);
   case ServiceLaunchMode::kInstall: {
-    const auto install_result = InstallServiceBinary(options.service);
+    const auto install_result = InstallServiceBinary(options);
     if (!install_result.ok()) {
       std::cerr << install_result.error().message << "\n";
       return 1;
@@ -614,7 +722,7 @@ int RunServiceHost(const ServiceHostOptions& options) {
     return 0;
   }
   case ServiceLaunchMode::kServiceDispatcher: {
-    WindowsServiceHost host(options.service);
+    WindowsServiceHost host(options);
     return host.RunDispatcher();
   }
   }

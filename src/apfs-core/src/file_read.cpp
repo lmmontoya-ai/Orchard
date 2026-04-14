@@ -32,21 +32,23 @@ blockio::Result<FileMetadata> GetFileMetadata(const VolumeContext& volume,
   metadata.mode = inode_result.value().mode;
   metadata.sparse = (inode_result.value().internal_flags & kSparseFlag) != 0U;
 
-  auto xattr_result = volume.FindXattr(inode_id, kCompressionXattrName);
-  if (!xattr_result.ok()) {
-    return xattr_result.error();
-  }
-  const auto& compression_xattr = xattr_result.value();
-  if (compression_xattr.has_value()) {
-    const auto& compression_data = compression_xattr->data;
-    auto compression_result = ParseCompressionInfo(
-        std::span<const std::uint8_t>(compression_data.data(), compression_data.size()));
-    if (!compression_result.ok()) {
-      return compression_result.error();
+  if (metadata.kind == InodeKind::kRegularFile) {
+    auto xattr_result = volume.FindXattr(inode_id, kCompressionXattrName);
+    if (!xattr_result.ok()) {
+      return xattr_result.error();
     }
-    metadata.compression = compression_result.value();
-    if (metadata.compression.uncompressed_size != 0U) {
-      metadata.logical_size = metadata.compression.uncompressed_size;
+    const auto& compression_xattr = xattr_result.value();
+    if (compression_xattr.has_value()) {
+      const auto& compression_data = compression_xattr->data;
+      auto compression_result = ParseCompressionInfo(
+          std::span<const std::uint8_t>(compression_data.data(), compression_data.size()));
+      if (!compression_result.ok()) {
+        return compression_result.error();
+      }
+      metadata.compression = compression_result.value();
+      if (metadata.compression.uncompressed_size != 0U) {
+        metadata.logical_size = metadata.compression.uncompressed_size;
+      }
     }
   }
 

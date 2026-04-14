@@ -30,7 +30,8 @@ public:
   ScopedHandle(const ScopedHandle&) = delete;
   ScopedHandle& operator=(const ScopedHandle&) = delete;
 
-  ScopedHandle(ScopedHandle&& other) noexcept : handle_(std::exchange(other.handle_, INVALID_HANDLE_VALUE)) {}
+  ScopedHandle(ScopedHandle&& other) noexcept
+      : handle_(std::exchange(other.handle_, INVALID_HANDLE_VALUE)) {}
   ScopedHandle& operator=(ScopedHandle&& other) noexcept {
     if (this != &other) {
       if (handle_ != INVALID_HANDLE_VALUE) {
@@ -63,8 +64,7 @@ public:
     Stop();
   }
 
-  [[nodiscard]] blockio::Result<std::monostate>
-  Start(DeviceMonitorCallback callback) override {
+  [[nodiscard]] blockio::Result<std::monostate> Start(DeviceMonitorCallback callback) override {
     std::scoped_lock lock(mutex_);
     if (running_) {
       return MakeMountServiceError(blockio::ErrorCode::kInvalidArgument,
@@ -78,8 +78,8 @@ public:
     filter.FilterType = CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE;
     filter.u.DeviceInterface.ClassGuid = GUID_DEVINTERFACE_DISK;
 
-    const auto config_result = ::CM_Register_Notification(&filter, this, &DefaultDeviceMonitor::NotificationThunk,
-                                                          &interface_notification_);
+    const auto config_result = ::CM_Register_Notification(
+        &filter, this, &DefaultDeviceMonitor::NotificationThunk, &interface_notification_);
     if (config_result != CR_SUCCESS) {
       callback_ = {};
       return MakeMountServiceError(blockio::ErrorCode::kOpenFailed,
@@ -132,12 +132,12 @@ public:
     }
 
     ScopedHandle handle(::CreateFileW(device_path_buffer.c_str(), 0,
-                                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-                                      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+                                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                      nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
     if (handle.get() == INVALID_HANDLE_VALUE) {
-      return MakeMountServiceError(blockio::ErrorCode::kOpenFailed,
-                                   "Failed to open a mounted Orchard device for removal notifications.",
-                                   ::GetLastError());
+      return MakeMountServiceError(
+          blockio::ErrorCode::kOpenFailed,
+          "Failed to open a mounted Orchard device for removal notifications.", ::GetLastError());
     }
 
     auto context = std::make_unique<HandleRegistrationContext>();
@@ -150,9 +150,8 @@ public:
     filter.u.DeviceHandle.hTarget = handle.get();
 
     HCMNOTIFICATION notification = nullptr;
-    const auto config_result = ::CM_Register_Notification(&filter, context.get(),
-                                                          &DefaultDeviceMonitor::NotificationThunk,
-                                                          &notification);
+    const auto config_result = ::CM_Register_Notification(
+        &filter, context.get(), &DefaultDeviceMonitor::NotificationThunk, &notification);
     if (config_result != CR_SUCCESS) {
       return MakeMountServiceError(blockio::ErrorCode::kOpenFailed,
                                    "Failed to register Orchard for mounted-device notifications.",

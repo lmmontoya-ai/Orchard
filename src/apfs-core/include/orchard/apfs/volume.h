@@ -57,12 +57,20 @@ public:
   ReadPhysicalBytes(const PhysicalReadRequest& request) const;
 
 private:
+  struct TreeBlockIndexes {
+    std::uint64_t root_tree_block_index = 0;
+    std::uint64_t volume_omap_block_index = 0;
+  };
+
   VolumeContext(const blockio::Reader& reader, VolumeRuntimeConfig runtime, VolumeInfo info,
-                std::uint64_t root_tree_block_index);
+                TreeBlockIndexes tree_blocks);
 
   [[nodiscard]] PhysicalObjectReader MakeObjectReader() const;
+  [[nodiscard]] blockio::Result<std::optional<NodeRecordCopy>>
+  LowerBoundFilesystemRecord(const BtreeWalker::CompareFn& compare) const;
   [[nodiscard]] blockio::Result<std::size_t>
-  VisitFilesystemRecords(const BtreeWalker::VisitFn& visitor) const;
+  VisitFilesystemRange(const BtreeWalker::CompareFn& compare,
+                       const BtreeWalker::VisitFn& visitor) const;
 
   const blockio::Reader* reader_ = nullptr;
   std::uint64_t container_byte_offset_ = 0;
@@ -70,6 +78,7 @@ private:
   std::uint64_t xid_limit_ = 0;
   VolumeInfo info_;
   std::uint64_t root_tree_block_index_ = 0;
+  std::uint64_t volume_omap_block_index_ = 0;
 };
 
 } // namespace orchard::apfs

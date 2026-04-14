@@ -32,7 +32,8 @@ public:
   ScopedHandle(const ScopedHandle&) = delete;
   ScopedHandle& operator=(const ScopedHandle&) = delete;
 
-  ScopedHandle(ScopedHandle&& other) noexcept : handle_(std::exchange(other.handle_, INVALID_HANDLE_VALUE)) {}
+  ScopedHandle(ScopedHandle&& other) noexcept
+      : handle_(std::exchange(other.handle_, INVALID_HANDLE_VALUE)) {}
   ScopedHandle& operator=(ScopedHandle&& other) noexcept {
     if (this != &other) {
       if (handle_ != INVALID_HANDLE_VALUE) {
@@ -97,9 +98,9 @@ public:
   [[nodiscard]] blockio::Result<std::vector<DeviceInterfaceInfo>>
   EnumeratePresentDiskInterfaces() override {
     ULONG required_length = 0;
-    CONFIGRET config_result =
-        ::CM_Get_Device_Interface_List_SizeW(&required_length, const_cast<LPGUID>(&GUID_DEVINTERFACE_DISK),
-                                             nullptr, CM_GET_DEVICE_INTERFACE_LIST_PRESENT);
+    CONFIGRET config_result = ::CM_Get_Device_Interface_List_SizeW(
+        &required_length, const_cast<LPGUID>(&GUID_DEVINTERFACE_DISK), nullptr,
+        CM_GET_DEVICE_INTERFACE_LIST_PRESENT);
     if (config_result != CR_SUCCESS) {
       return MakeMountServiceError(blockio::ErrorCode::kOpenFailed,
                                    "Failed to determine the present disk-interface list length.",
@@ -111,8 +112,8 @@ public:
     }
 
     std::vector<wchar_t> buffer(required_length, L'\0');
-    config_result = ::CM_Get_Device_Interface_ListW(const_cast<LPGUID>(&GUID_DEVINTERFACE_DISK), nullptr,
-                                                    buffer.data(), required_length,
+    config_result = ::CM_Get_Device_Interface_ListW(const_cast<LPGUID>(&GUID_DEVINTERFACE_DISK),
+                                                    nullptr, buffer.data(), required_length,
                                                     CM_GET_DEVICE_INTERFACE_LIST_PRESENT);
     if (config_result != CR_SUCCESS) {
       return MakeMountServiceError(blockio::ErrorCode::kOpenFailed,
@@ -121,7 +122,8 @@ public:
 
     std::vector<DeviceInterfaceInfo> devices;
     std::unordered_set<std::wstring> seen_paths;
-    for (const wchar_t* cursor = buffer.data(); *cursor != L'\0'; cursor += std::wcslen(cursor) + 1U) {
+    for (const wchar_t* cursor = buffer.data(); *cursor != L'\0';
+         cursor += std::wcslen(cursor) + 1U) {
       auto physical_drive_result = ResolvePhysicalDrivePath(cursor);
       if (!physical_drive_result.ok()) {
         continue;

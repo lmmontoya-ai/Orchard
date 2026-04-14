@@ -29,8 +29,7 @@ class DeviceMonitor {
 public:
   virtual ~DeviceMonitor() = default;
 
-  [[nodiscard]] virtual blockio::Result<std::monostate>
-  Start(DeviceMonitorCallback callback) = 0;
+  [[nodiscard]] virtual blockio::Result<std::monostate> Start(DeviceMonitorCallback callback) = 0;
   virtual void Stop() noexcept = 0;
 
   [[nodiscard]] virtual blockio::Result<std::monostate>

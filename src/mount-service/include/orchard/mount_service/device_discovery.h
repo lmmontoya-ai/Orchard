@@ -33,9 +33,9 @@ public:
            const std::vector<std::wstring>& active_mount_points) = 0;
 };
 
-using MountVolumeCallback = std::function<blockio::Result<MountedSessionRecord>(const MountRequest&)>;
-using UnmountVolumeCallback =
-    std::function<blockio::Result<std::monostate>(const UnmountRequest&)>;
+using MountVolumeCallback =
+    std::function<blockio::Result<MountedSessionRecord>(const MountRequest&)>;
+using UnmountVolumeCallback = std::function<blockio::Result<std::monostate>(const UnmountRequest&)>;
 
 struct DeviceDiscoveryCallbacks {
   RescanTaskPoster post_task;

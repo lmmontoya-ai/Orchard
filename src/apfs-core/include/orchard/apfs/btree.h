@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <span>
 #include <vector>
@@ -83,6 +84,8 @@ public:
   [[nodiscard]] blockio::Result<NodeRecordView> RecordAt(std::size_t index) const;
   [[nodiscard]] blockio::Result<std::optional<std::size_t>>
   FindFloorIndex(const CompareFn& compare) const;
+  [[nodiscard]] blockio::Result<std::optional<std::size_t>>
+  FindLowerBoundIndex(const CompareFn& compare) const;
 
 private:
   std::span<const std::uint8_t> bytes_;
@@ -101,19 +104,58 @@ class BtreeWalker {
 public:
   using CompareFn = NodeView::CompareFn;
   using VisitFn = std::function<blockio::Result<bool>(const NodeRecordView&)>;
+  using ChildResolverFn = std::function<blockio::Result<std::uint64_t>(std::uint64_t)>;
 
-  explicit BtreeWalker(const PhysicalObjectReader& reader);
+  class Cursor {
+  public:
+    Cursor();
+    ~Cursor();
+    Cursor(Cursor&&) noexcept;
+    Cursor& operator=(Cursor&&) noexcept;
+    Cursor(const Cursor&) = delete;
+    Cursor& operator=(const Cursor&) = delete;
+
+    [[nodiscard]] bool valid() const noexcept;
+    [[nodiscard]] blockio::Result<NodeRecordView> Current() const;
+    [[nodiscard]] blockio::Result<NodeRecordCopy> CurrentCopy() const;
+    [[nodiscard]] blockio::Result<bool> Advance();
+
+  private:
+    struct State;
+
+    explicit Cursor(std::unique_ptr<State> state);
+
+    std::unique_ptr<State> state_;
+
+    friend class BtreeWalker;
+  };
+
+  explicit BtreeWalker(const PhysicalObjectReader& reader,
+                       ChildResolverFn child_resolver = ChildResolverFn{});
 
   [[nodiscard]] blockio::Result<std::optional<NodeRecordCopy>> Find(std::uint64_t root_block_index,
                                                                     const CompareFn& compare) const;
+  [[nodiscard]] blockio::Result<std::optional<Cursor>> LowerBound(std::uint64_t root_block_index,
+                                                                  const CompareFn& compare) const;
+  [[nodiscard]] blockio::Result<std::size_t> VisitRange(std::uint64_t root_block_index,
+                                                        const CompareFn& compare,
+                                                        const VisitFn& visitor) const;
   [[nodiscard]] blockio::Result<std::size_t> VisitInOrder(std::uint64_t root_block_index,
                                                           const VisitFn& visitor) const;
 
 private:
+  [[nodiscard]] blockio::Result<ObjectBlock> ReadObject(std::uint64_t block_index) const;
+  [[nodiscard]] blockio::Result<std::uint64_t>
+  ResolveChildBlockIndex(std::uint64_t child_identifier) const;
+  [[nodiscard]] blockio::Result<std::optional<Cursor>>
+  BuildLowerBoundCursor(std::uint64_t root_block_index, const CompareFn& compare) const;
+  [[nodiscard]] blockio::Result<bool> DescendToLeftmostLeaf(Cursor::State& state) const;
+  [[nodiscard]] blockio::Result<bool> AdvanceCursor(Cursor::State& state) const;
   [[nodiscard]] blockio::Result<std::size_t>
   VisitNodeInOrder(std::uint64_t block_index, const VisitFn& visitor, std::size_t visited) const;
 
   const PhysicalObjectReader* reader_ = nullptr;
+  ChildResolverFn child_resolver_;
 };
 
 } // namespace orchard::apfs

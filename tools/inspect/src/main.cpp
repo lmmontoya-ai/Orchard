@@ -48,21 +48,76 @@ std::string ToHexString(const std::uint64_t value) {
   return stream.str();
 }
 
+struct CommandLineOptions {
+  std::string target;
+  orchard::apfs::InspectionOptions inspection;
+};
+
 void PrintUsage(const std::string_view program_name) {
-  std::cout << "Usage: " << program_name << " --target <path>\n";
-  std::cout << "   or: " << program_name << " <path>\n";
+  std::cout << "Usage: " << program_name << " --target <path> [--enrich-raw]"
+            << " [--volume-oid <id>]\n";
+  std::cout << "   or: " << program_name << " <path> [--enrich-raw] [--volume-oid <id>]\n";
 }
 
-std::string GetTargetArgument(int argc, char** argv) {
-  if (argc == 2) {
-    return argv[1];
+std::optional<std::uint64_t> ParseUint64(const std::string_view text) {
+  try {
+    std::size_t parsed = 0;
+    const auto value = std::stoull(std::string(text), &parsed, 0);
+    if (parsed != text.size()) {
+      return std::nullopt;
+    }
+    return value;
+  } catch (...) {
+    return std::nullopt;
+  }
+}
+
+std::optional<CommandLineOptions> ParseCommandLine(int argc, char** argv) {
+  CommandLineOptions options;
+  bool target_consumed = false;
+
+  for (int index = 1; index < argc; ++index) {
+    const std::string_view argument(argv[index]);
+    if (argument == "--help" || argument == "-h") {
+      return CommandLineOptions{};
+    }
+    if (argument == "--target") {
+      if (index + 1 >= argc) {
+        return std::nullopt;
+      }
+      options.target = argv[++index];
+      target_consumed = true;
+      continue;
+    }
+    if (argument == "--enrich-raw") {
+      options.inspection.enrich_raw_device_volumes = true;
+      continue;
+    }
+    if (argument == "--volume-oid") {
+      if (index + 1 >= argc) {
+        return std::nullopt;
+      }
+      const auto parsed = ParseUint64(argv[++index]);
+      if (!parsed.has_value()) {
+        return std::nullopt;
+      }
+      options.inspection.enrich_raw_device_volumes = true;
+      options.inspection.volume_object_id = *parsed;
+      continue;
+    }
+    if (!target_consumed && !argument.starts_with("-")) {
+      options.target = std::string(argument);
+      target_consumed = true;
+      continue;
+    }
+
+    return std::nullopt;
   }
 
-  if (argc == 3 && std::string_view(argv[1]) == "--target") {
-    return argv[2];
+  if (options.target.empty()) {
+    return std::nullopt;
   }
-
-  return {};
+  return options;
 }
 
 void PrintQuotedStringArray(const std::vector<std::string>& values, const std::string_view indent) {
@@ -478,15 +533,19 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  const std::string argument = GetTargetArgument(argc, argv);
-  if (argument.empty() || argument == "--help" || argument == "-h") {
+  const auto options = ParseCommandLine(argc, argv);
+  if (!options.has_value()) {
     PrintUsage(argv[0]);
-    return argument.empty() ? 1 : 0;
+    return 1;
+  }
+  if (options->target.empty()) {
+    PrintUsage(argv[0]);
+    return 0;
   }
 
-  const auto target_path = std::filesystem::path(argument);
+  const auto target_path = std::filesystem::path(options->target);
   const auto target_info = orchard::blockio::InspectTargetPath(target_path);
-  const auto inspection_result = orchard::apfs::InspectTarget(target_info);
+  const auto inspection_result = orchard::apfs::InspectTarget(target_info, options->inspection);
   PrintJson(target_info, inspection_result);
   return 0;
 }

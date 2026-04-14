@@ -164,6 +164,21 @@ ParseFixedRecord(const std::span<const std::uint8_t> bytes, const std::size_t ke
 }
 // NOLINTEND(bugprone-easily-swappable-parameters)
 
+struct NodeRecordIdentity {
+  std::uint64_t block_index = 0U;
+  std::uint16_t level = 0U;
+};
+
+NodeRecordCopy CopyRecord(const NodeRecordView& record, const NodeRecordIdentity& identity) {
+  NodeRecordCopy copy;
+  copy.index = record.index;
+  copy.node_block_index = identity.block_index;
+  copy.node_level = identity.level;
+  copy.key.assign(record.key.begin(), record.key.end());
+  copy.value.assign(record.value.begin(), record.value.end());
+  return copy;
+}
+
 } // namespace
 
 // NOLINTBEGIN(bugprone-easily-swappable-parameters)
@@ -238,6 +253,40 @@ NodeView::FindFloorIndex(const CompareFn& compare) const {
   return floor_index;
 }
 
+blockio::Result<std::optional<std::size_t>>
+NodeView::FindLowerBoundIndex(const CompareFn& compare) const {
+  if (header_.record_count == 0U) {
+    return std::optional<std::size_t>{};
+  }
+
+  std::size_t left = 0U;
+  std::size_t right = header_.record_count;
+  while (left < right) {
+    const auto current = left + ((right - left) / 2U);
+    auto record_result = RecordAt(current);
+    if (!record_result.ok()) {
+      return record_result.error();
+    }
+
+    auto compare_value_result = compare(record_result.value().key);
+    if (!compare_value_result.ok()) {
+      return compare_value_result.error();
+    }
+
+    if (compare_value_result.value() < 0) {
+      left = current + 1U;
+    } else {
+      right = current;
+    }
+  }
+
+  if (left >= header_.record_count) {
+    return std::optional<std::size_t>{};
+  }
+
+  return std::optional<std::size_t>(left);
+}
+
 blockio::Result<NodeView> ParseNode(const std::span<const std::uint8_t> block,
                                     const std::uint32_t block_size) {
   if (block_size == 0U || block.size() < block_size || !HasRange(block, 0U, kBtreeNodeHeaderSize)) {
@@ -251,8 +300,9 @@ blockio::Result<NodeView> ParseNode(const std::span<const std::uint8_t> block,
   }
 
   const auto& object_header = object_header_result.value();
-  if (object_header.type != kObjectTypeBtreeNode) {
-    return MakeApfsError(blockio::ErrorCode::kInvalidFormat, "APFS object is not a B-tree node.");
+  if (object_header.type != kObjectTypeBtreeNode && object_header.type != kObjectTypeBtree) {
+    return MakeApfsError(blockio::ErrorCode::kInvalidFormat,
+                         "APFS object is not a B-tree node or root object.");
   }
 
   NodeHeader header;
@@ -327,15 +377,307 @@ blockio::Result<NodeView> ParseNode(const std::span<const std::uint8_t> block,
 }
 
 blockio::Result<std::uint64_t> ParseChildBlockIndex(const std::span<const std::uint8_t> value) {
-  if (value.size() != sizeof(std::uint64_t)) {
+  if (value.size() < sizeof(std::uint64_t)) {
     return MakeApfsError(blockio::ErrorCode::kCorruptData,
-                         "APFS internal B-tree record does not contain an 8-byte child pointer.");
+                         "APFS internal B-tree record does not contain at least an 8-byte child "
+                         "identifier.");
   }
 
   return ReadLe64(value, 0U);
 }
 
-BtreeWalker::BtreeWalker(const PhysicalObjectReader& reader) : reader_(&reader) {}
+struct BtreeWalker::Cursor::State {
+  struct Frame {
+    ObjectBlock object;
+    std::size_t index = 0U;
+  };
+
+  const BtreeWalker* walker = nullptr;
+  std::vector<Frame> frames;
+};
+
+BtreeWalker::Cursor::Cursor() = default;
+BtreeWalker::Cursor::~Cursor() = default;
+BtreeWalker::Cursor::Cursor(Cursor&&) noexcept = default;
+BtreeWalker::Cursor& BtreeWalker::Cursor::operator=(Cursor&&) noexcept = default;
+
+BtreeWalker::Cursor::Cursor(std::unique_ptr<State> state) : state_(std::move(state)) {}
+
+bool BtreeWalker::Cursor::valid() const noexcept {
+  return state_ != nullptr && !state_->frames.empty();
+}
+
+blockio::Result<NodeRecordView> BtreeWalker::Cursor::Current() const {
+  if (!valid()) {
+    return MakeApfsError(blockio::ErrorCode::kNotFound,
+                         "B-tree cursor does not currently point at a record.");
+  }
+
+  const auto& leaf_frame = state_->frames.back();
+  auto node_result = ParseNode(leaf_frame.object.view(), state_->walker->reader_->block_size());
+  if (!node_result.ok()) {
+    return node_result.error();
+  }
+  if (!node_result.value().is_leaf()) {
+    return MakeApfsError(blockio::ErrorCode::kCorruptData,
+                         "B-tree cursor stopped on a non-leaf node.");
+  }
+  if (leaf_frame.index >= node_result.value().header().record_count) {
+    return MakeApfsError(blockio::ErrorCode::kOutOfRange,
+                         "B-tree cursor record index is outside the leaf record count.");
+  }
+
+  return node_result.value().RecordAt(leaf_frame.index);
+}
+
+blockio::Result<NodeRecordCopy> BtreeWalker::Cursor::CurrentCopy() const {
+  auto record_result = Current();
+  if (!record_result.ok()) {
+    return record_result.error();
+  }
+
+  const auto& leaf_frame = state_->frames.back();
+  auto node_result = ParseNode(leaf_frame.object.view(), state_->walker->reader_->block_size());
+  if (!node_result.ok()) {
+    return node_result.error();
+  }
+
+  return CopyRecord(record_result.value(), NodeRecordIdentity{
+                                               .block_index = leaf_frame.object.block_index,
+                                               .level = node_result.value().header().level,
+                                           });
+}
+
+blockio::Result<bool> BtreeWalker::Cursor::Advance() {
+  if (!valid()) {
+    return false;
+  }
+
+  auto advance_result = state_->walker->AdvanceCursor(*state_);
+  if (!advance_result.ok()) {
+    return advance_result.error();
+  }
+  if (!advance_result.value()) {
+    state_->frames.clear();
+  }
+  return advance_result.value();
+}
+
+BtreeWalker::BtreeWalker(const PhysicalObjectReader& reader, ChildResolverFn child_resolver)
+    : reader_(&reader), child_resolver_(std::move(child_resolver)) {}
+
+blockio::Result<ObjectBlock> BtreeWalker::ReadObject(const std::uint64_t block_index) const {
+  if (reader_ == nullptr) {
+    return MakeApfsError(blockio::ErrorCode::kInvalidArgument,
+                         "B-tree walker is not configured with a physical object reader.");
+  }
+
+  return reader_->ReadPhysicalObject(block_index);
+}
+
+blockio::Result<std::uint64_t>
+BtreeWalker::ResolveChildBlockIndex(const std::uint64_t child_identifier) const {
+  if (!child_resolver_) {
+    return child_identifier;
+  }
+  return child_resolver_(child_identifier);
+}
+
+blockio::Result<std::optional<BtreeWalker::Cursor>>
+BtreeWalker::BuildLowerBoundCursor(const std::uint64_t root_block_index,
+                                   const CompareFn& compare) const {
+  auto state = std::make_unique<Cursor::State>();
+  state->walker = this;
+
+  std::uint64_t current_block_index = root_block_index;
+  for (std::size_t depth = 0; depth < 12U; ++depth) {
+    auto object_result = ReadObject(current_block_index);
+    if (!object_result.ok()) {
+      return object_result.error();
+    }
+
+    auto node_result = ParseNode(object_result.value().view(), reader_->block_size());
+    if (!node_result.ok()) {
+      return node_result.error();
+    }
+    if (node_result.value().header().record_count == 0U) {
+      return std::optional<Cursor>{};
+    }
+
+    Cursor::State::Frame frame{
+        .object = std::move(object_result.value()),
+        .index = 0U,
+    };
+
+    if (node_result.value().is_leaf()) {
+      auto lower_bound_result = node_result.value().FindLowerBoundIndex(compare);
+      if (!lower_bound_result.ok()) {
+        return lower_bound_result.error();
+      }
+
+      const auto lower_bound_index = lower_bound_result.value();
+      if (lower_bound_index.has_value()) {
+        frame.index = *lower_bound_index;
+        state->frames.push_back(std::move(frame));
+        return std::optional<Cursor>(Cursor(std::move(state)));
+      }
+
+      frame.index = node_result.value().header().record_count;
+      state->frames.push_back(std::move(frame));
+      auto advance_result = AdvanceCursor(*state);
+      if (!advance_result.ok()) {
+        return advance_result.error();
+      }
+      if (!advance_result.value()) {
+        return std::optional<Cursor>{};
+      }
+      return std::optional<Cursor>(Cursor(std::move(state)));
+    }
+
+    auto floor_index_result = node_result.value().FindFloorIndex(compare);
+    if (!floor_index_result.ok()) {
+      return floor_index_result.error();
+    }
+
+    frame.index = floor_index_result.value().value_or(0U);
+    auto record_result = node_result.value().RecordAt(frame.index);
+    if (!record_result.ok()) {
+      return record_result.error();
+    }
+
+    auto child_identifier_result = ParseChildBlockIndex(record_result.value().value);
+    if (!child_identifier_result.ok()) {
+      return child_identifier_result.error();
+    }
+    auto child_block_result = ResolveChildBlockIndex(child_identifier_result.value());
+    if (!child_block_result.ok()) {
+      return child_block_result.error();
+    }
+
+    state->frames.push_back(std::move(frame));
+    current_block_index = child_block_result.value();
+  }
+
+  return MakeApfsError(blockio::ErrorCode::kCorruptData,
+                       "APFS B-tree height exceeded the supported traversal depth.");
+}
+
+blockio::Result<bool> BtreeWalker::DescendToLeftmostLeaf(Cursor::State& state) const {
+  while (!state.frames.empty()) {
+    auto& frame = state.frames.back();
+    auto node_result = ParseNode(frame.object.view(), reader_->block_size());
+    if (!node_result.ok()) {
+      return node_result.error();
+    }
+
+    if (node_result.value().is_leaf()) {
+      if (node_result.value().header().record_count == 0U) {
+        return false;
+      }
+      frame.index = 0U;
+      return true;
+    }
+    if (node_result.value().header().record_count == 0U) {
+      return false;
+    }
+
+    frame.index = 0U;
+    auto record_result = node_result.value().RecordAt(0U);
+    if (!record_result.ok()) {
+      return record_result.error();
+    }
+
+    auto child_identifier_result = ParseChildBlockIndex(record_result.value().value);
+    if (!child_identifier_result.ok()) {
+      return child_identifier_result.error();
+    }
+    auto child_block_result = ResolveChildBlockIndex(child_identifier_result.value());
+    if (!child_block_result.ok()) {
+      return child_block_result.error();
+    }
+
+    auto child_object_result = ReadObject(child_block_result.value());
+    if (!child_object_result.ok()) {
+      return child_object_result.error();
+    }
+    state.frames.push_back(Cursor::State::Frame{
+        .object = std::move(child_object_result.value()),
+        .index = 0U,
+    });
+  }
+
+  return false;
+}
+
+blockio::Result<bool> BtreeWalker::AdvanceCursor(Cursor::State& state) const {
+  if (state.frames.empty()) {
+    return false;
+  }
+
+  auto& leaf_frame = state.frames.back();
+  auto leaf_node_result = ParseNode(leaf_frame.object.view(), reader_->block_size());
+  if (!leaf_node_result.ok()) {
+    return leaf_node_result.error();
+  }
+  if (!leaf_node_result.value().is_leaf()) {
+    return MakeApfsError(blockio::ErrorCode::kCorruptData,
+                         "B-tree cursor is not currently positioned on a leaf node.");
+  }
+
+  if (leaf_frame.index + 1U < leaf_node_result.value().header().record_count) {
+    ++leaf_frame.index;
+    return true;
+  }
+
+  for (std::size_t depth = state.frames.size(); depth-- > 1U;) {
+    auto& parent_frame = state.frames[depth - 1U];
+    auto parent_node_result = ParseNode(parent_frame.object.view(), reader_->block_size());
+    if (!parent_node_result.ok()) {
+      return parent_node_result.error();
+    }
+
+    if (parent_frame.index + 1U >= parent_node_result.value().header().record_count) {
+      continue;
+    }
+
+    ++parent_frame.index;
+    state.frames.resize(depth);
+
+    auto parent_record_result = parent_node_result.value().RecordAt(parent_frame.index);
+    if (!parent_record_result.ok()) {
+      return parent_record_result.error();
+    }
+
+    auto child_identifier_result = ParseChildBlockIndex(parent_record_result.value().value);
+    if (!child_identifier_result.ok()) {
+      return child_identifier_result.error();
+    }
+    auto child_block_result = ResolveChildBlockIndex(child_identifier_result.value());
+    if (!child_block_result.ok()) {
+      return child_block_result.error();
+    }
+
+    auto child_object_result = ReadObject(child_block_result.value());
+    if (!child_object_result.ok()) {
+      return child_object_result.error();
+    }
+    state.frames.push_back(Cursor::State::Frame{
+        .object = std::move(child_object_result.value()),
+        .index = 0U,
+    });
+
+    auto descend_result = DescendToLeftmostLeaf(state);
+    if (!descend_result.ok()) {
+      return descend_result.error();
+    }
+    if (descend_result.value()) {
+      return true;
+    }
+  }
+
+  state.frames.clear();
+  return false;
+}
 
 blockio::Result<std::optional<NodeRecordCopy>>
 BtreeWalker::Find(const std::uint64_t root_block_index, const CompareFn& compare) const {
@@ -371,24 +713,73 @@ BtreeWalker::Find(const std::uint64_t root_block_index, const CompareFn& compare
     }
 
     if (node_result.value().is_leaf()) {
-      NodeRecordCopy record;
-      record.index = record_result.value().index;
-      record.node_block_index = current_block_index;
-      record.node_level = node_result.value().header().level;
-      record.key.assign(record_result.value().key.begin(), record_result.value().key.end());
-      record.value.assign(record_result.value().value.begin(), record_result.value().value.end());
-      return std::optional<NodeRecordCopy>(std::move(record));
+      return std::optional<NodeRecordCopy>(
+          CopyRecord(record_result.value(), NodeRecordIdentity{
+                                                .block_index = current_block_index,
+                                                .level = node_result.value().header().level,
+                                            }));
     }
 
     auto child_result = ParseChildBlockIndex(record_result.value().value);
     if (!child_result.ok()) {
       return child_result.error();
     }
-    current_block_index = child_result.value();
+    auto child_block_result = ResolveChildBlockIndex(child_result.value());
+    if (!child_block_result.ok()) {
+      return child_block_result.error();
+    }
+    current_block_index = child_block_result.value();
   }
 
   return MakeApfsError(blockio::ErrorCode::kCorruptData,
                        "APFS B-tree height exceeded the supported traversal depth.");
+}
+
+blockio::Result<std::optional<BtreeWalker::Cursor>>
+BtreeWalker::LowerBound(const std::uint64_t root_block_index, const CompareFn& compare) const {
+  return BuildLowerBoundCursor(root_block_index, compare);
+}
+
+blockio::Result<std::size_t> BtreeWalker::VisitRange(const std::uint64_t root_block_index,
+                                                     const CompareFn& compare,
+                                                     const VisitFn& visitor) const {
+  auto cursor_result = BuildLowerBoundCursor(root_block_index, compare);
+  if (!cursor_result.ok()) {
+    return cursor_result.error();
+  }
+  if (!cursor_result.value().has_value()) {
+    return 0U;
+  }
+
+  auto& cursor_state = cursor_result.value();
+  auto cursor = std::move(cursor_state).value_or(Cursor{});
+  std::size_t total_visited = 0U;
+  while (cursor.valid()) {
+    auto record_result = cursor.Current();
+    if (!record_result.ok()) {
+      return record_result.error();
+    }
+
+    auto visitor_result = visitor(record_result.value());
+    if (!visitor_result.ok()) {
+      return visitor_result.error();
+    }
+
+    ++total_visited;
+    if (!visitor_result.value()) {
+      return total_visited;
+    }
+
+    auto advance_result = cursor.Advance();
+    if (!advance_result.ok()) {
+      return advance_result.error();
+    }
+    if (!advance_result.value()) {
+      break;
+    }
+  }
+
+  return total_visited;
 }
 
 blockio::Result<std::size_t> BtreeWalker::VisitInOrder(const std::uint64_t root_block_index,
@@ -442,7 +833,12 @@ blockio::Result<std::size_t> BtreeWalker::VisitNodeInOrder(const std::uint64_t b
       return child_result.error();
     }
 
-    auto child_visit_result = VisitNodeInOrder(child_result.value(), visitor, total_visited);
+    auto child_block_result = ResolveChildBlockIndex(child_result.value());
+    if (!child_block_result.ok()) {
+      return child_block_result.error();
+    }
+
+    auto child_visit_result = VisitNodeInOrder(child_block_result.value(), visitor, total_visited);
     if (!child_visit_result.ok()) {
       return child_visit_result.error();
     }

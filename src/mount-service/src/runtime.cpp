@@ -312,6 +312,33 @@ blockio::Result<std::vector<MountedSessionRecord>> ServiceRuntime::ListMounts() 
   return UnwrapAsyncResult(future.get());
 }
 
+blockio::Result<std::vector<KnownDeviceRecord>> ServiceRuntime::ListDevices() {
+  if (!IsRunning()) {
+    return MakeMountServiceError(
+        blockio::ErrorCode::kAccessDenied,
+        "List-devices requests require a running Orchard service runtime.");
+  }
+
+  auto promise = std::make_shared<std::promise<AsyncResult<std::vector<KnownDeviceRecord>>>>();
+  auto future = promise->get_future();
+
+  {
+    if (!PostCommand([this, promise]() mutable {
+          if (!device_discovery_manager_) {
+            promise->set_value(WrapAsyncResult(
+                blockio::Result<std::vector<KnownDeviceRecord>>(std::vector<KnownDeviceRecord>{})));
+            return;
+          }
+          promise->set_value(WrapAsyncResult(blockio::Result<std::vector<KnownDeviceRecord>>(
+              device_discovery_manager_->ListDevices())));
+        })) {
+      return MakeMountServiceError(blockio::ErrorCode::kAccessDenied,
+                                   "The Orchard service runtime is stopping.");
+    }
+  }
+  return UnwrapAsyncResult(future.get());
+}
+
 ServiceStateSnapshot ServiceRuntime::state() const noexcept {
   std::scoped_lock lock(state_mutex_);
   return state_machine_.snapshot();
