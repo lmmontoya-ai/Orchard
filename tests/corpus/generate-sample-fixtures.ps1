@@ -85,11 +85,11 @@ def object_header(buf, base, oid, xid, typ, subtype):
     w32(buf, base + 0x18, typ)
     w32(buf, base + 0x1C, subtype)
 
-def nxsb(buf, base, xid):
+def nxsb(buf, base, xid, block_count=BLOCK_COUNT):
     object_header(buf, base, base // APFS_BLOCK_SIZE, xid, OBJ_TYPE_NXSB, 0)
     wa(buf, base + 0x20, "NXSB")
     w32(buf, base + 0x24, APFS_BLOCK_SIZE)
-    w64(buf, base + 0x28, BLOCK_COUNT)
+    w64(buf, base + 0x28, block_count)
     wbytes(buf, base + 0x48, bytes([0x10,0x11,0x12,0x13,0x20,0x21,0x22,0x23,0x30,0x31,0x32,0x33,0x40,0x41,0x42,0x43]))
     w64(buf, base + 0x60, xid + 1)
     w32(buf, base + 0x68, 1)
@@ -448,8 +448,8 @@ def build_explorer_stress():
         raise RuntimeError("Explorer stress fixture exceeded the reserved metadata leaf range.")
 
     buf = bytearray(APFS_BLOCK_SIZE * block_count)
-    nxsb(buf, 0, 1)
-    nxsb(buf, APFS_BLOCK_SIZE, CURRENT_CHECKPOINT_XID)
+    nxsb(buf, 0, 1, block_count)
+    nxsb(buf, APFS_BLOCK_SIZE, CURRENT_CHECKPOINT_XID, block_count)
     omap_sb(buf, APFS_BLOCK_SIZE * CONTAINER_OMAP_OBJECT_BLOCK, CONTAINER_OMAP_OBJECT_BLOCK, CURRENT_CHECKPOINT_XID, CONTAINER_OMAP_ROOT_BLOCK)
     omap_root(buf, APFS_BLOCK_SIZE * CONTAINER_OMAP_ROOT_BLOCK, CONTAINER_OMAP_ROOT_BLOCK, CURRENT_CHECKPOINT_XID, VOLUME_OBJECT_ID, 20, CONTAINER_OMAP_LEAF_BLOCK)
     omap_leaf(buf, APFS_BLOCK_SIZE * CONTAINER_OMAP_LEAF_BLOCK, CONTAINER_OMAP_LEAF_BLOCK, CURRENT_CHECKPOINT_XID, [
@@ -483,11 +483,84 @@ def build_explorer_stress():
 
     return bytes(buf)
 
+def build_link_behavior():
+    block_count = 24
+    root_tree_block = 9
+    alpha_data_blocks = [10, 11]
+    note_data_block = 12
+    relative_link_data_block = 13
+    absolute_link_data_block = 14
+    broken_link_data_block = 15
+    hard_link_data_block = 16
+
+    relative_link_inode_id = 70
+    absolute_link_inode_id = 71
+    broken_link_inode_id = 72
+    hard_link_inode_id = 73
+
+    relative_link_target = b"docs/note.txt"
+    absolute_link_target = b"/alpha.txt"
+    broken_link_target = b"/missing/ghost.txt"
+    hard_link_text = b"Shared hard-link payload\n"
+
+    records = [
+        (inode_key(ROOT_INODE_ID), inode_value(ROOT_INODE_ID, 0, 0, 0, 8, 0x4000)),
+        (inode_key(ALPHA_INODE_ID), inode_value(ROOT_INODE_ID, len(ALPHA_EXTENT1)+len(ALPHA_EXTENT2), len(ALPHA_EXTENT1)+len(ALPHA_EXTENT2), 0, 0, 0x8000)),
+        (inode_key(DOCS_INODE_ID), inode_value(ROOT_INODE_ID, 0, 0, 0, 1, 0x4000)),
+        (inode_key(NOTE_INODE_ID), inode_value(DOCS_INODE_ID, len(NOTE_TEXT), len(NOTE_TEXT), 0, 0, 0x8000, link_count=2)),
+        (inode_key(relative_link_inode_id), inode_value(ROOT_INODE_ID, len(relative_link_target), len(relative_link_target), 0, 0, 0xA000)),
+        (inode_key(absolute_link_inode_id), inode_value(ROOT_INODE_ID, len(absolute_link_target), len(absolute_link_target), 0, 0, 0xA000)),
+        (inode_key(broken_link_inode_id), inode_value(ROOT_INODE_ID, len(broken_link_target), len(broken_link_target), 0, 0, 0xA000)),
+        (inode_key(hard_link_inode_id), inode_value(ROOT_INODE_ID, len(hard_link_text), len(hard_link_text), 0, 0, 0x8000, link_count=2)),
+        (named_key(ROOT_INODE_ID, FS_TYPE_DIR_REC, "a-relative-note-link.txt"), dir_value(relative_link_inode_id)),
+        (named_key(ROOT_INODE_ID, FS_TYPE_DIR_REC, "absolute-alpha-link.txt"), dir_value(absolute_link_inode_id)),
+        (named_key(ROOT_INODE_ID, FS_TYPE_DIR_REC, "alpha.txt"), dir_value(ALPHA_INODE_ID)),
+        (named_key(ROOT_INODE_ID, FS_TYPE_DIR_REC, "broken-link.txt"), dir_value(broken_link_inode_id)),
+        (named_key(ROOT_INODE_ID, FS_TYPE_DIR_REC, "docs"), dir_value(DOCS_INODE_ID)),
+        (named_key(ROOT_INODE_ID, FS_TYPE_DIR_REC, "hard-a.txt"), dir_value(hard_link_inode_id)),
+        (named_key(ROOT_INODE_ID, FS_TYPE_DIR_REC, "hard-b.txt"), dir_value(hard_link_inode_id)),
+        (named_key(ROOT_INODE_ID, FS_TYPE_DIR_REC, "note-link.txt"), dir_value(NOTE_INODE_ID)),
+        (named_key(DOCS_INODE_ID, FS_TYPE_DIR_REC, "note.txt"), dir_value(NOTE_INODE_ID)),
+        (extent_key(ALPHA_INODE_ID, 0), extent_value(len(ALPHA_EXTENT1), alpha_data_blocks[0])),
+        (extent_key(ALPHA_INODE_ID, len(ALPHA_EXTENT1)), extent_value(len(ALPHA_EXTENT2), alpha_data_blocks[1])),
+        (extent_key(NOTE_INODE_ID, 0), extent_value(len(NOTE_TEXT), note_data_block)),
+        (extent_key(relative_link_inode_id, 0), extent_value(len(relative_link_target), relative_link_data_block)),
+        (extent_key(absolute_link_inode_id, 0), extent_value(len(absolute_link_target), absolute_link_data_block)),
+        (extent_key(broken_link_inode_id, 0), extent_value(len(broken_link_target), broken_link_data_block)),
+        (extent_key(hard_link_inode_id, 0), extent_value(len(hard_link_text), hard_link_data_block)),
+    ]
+
+    sorted_records = sorted(records, key=lambda record: record[0])
+    buf = bytearray(APFS_BLOCK_SIZE * block_count)
+    nxsb(buf, 0, 1, block_count)
+    nxsb(buf, APFS_BLOCK_SIZE, CURRENT_CHECKPOINT_XID, block_count)
+    omap_sb(buf, APFS_BLOCK_SIZE * CONTAINER_OMAP_OBJECT_BLOCK, CONTAINER_OMAP_OBJECT_BLOCK, CURRENT_CHECKPOINT_XID, CONTAINER_OMAP_ROOT_BLOCK)
+    omap_root(buf, APFS_BLOCK_SIZE * CONTAINER_OMAP_ROOT_BLOCK, CONTAINER_OMAP_ROOT_BLOCK, CURRENT_CHECKPOINT_XID, VOLUME_OBJECT_ID, 20, CONTAINER_OMAP_LEAF_BLOCK)
+    omap_leaf(buf, APFS_BLOCK_SIZE * CONTAINER_OMAP_LEAF_BLOCK, CONTAINER_OMAP_LEAF_BLOCK, CURRENT_CHECKPOINT_XID, [
+        (VOLUME_OBJECT_ID, 20, 0, LEGACY_VOLUME_BLOCK),
+        (VOLUME_OBJECT_ID, CURRENT_CHECKPOINT_XID, 0, CURRENT_VOLUME_BLOCK),
+        (VOLUME_OMAP_OBJECT_ID, CURRENT_CHECKPOINT_XID, 0, VOLUME_OMAP_BLOCK),
+    ])
+    volume_superblock(buf, APFS_BLOCK_SIZE * LEGACY_VOLUME_BLOCK, 20, VOL_INCOMPAT_CASE_INSENSITIVE, VOL_ROLE_DATA, "Legacy Data")
+    volume_superblock(buf, APFS_BLOCK_SIZE * CURRENT_VOLUME_BLOCK, CURRENT_CHECKPOINT_XID, VOL_INCOMPAT_CASE_INSENSITIVE, VOL_ROLE_DATA, "Link Behavior")
+    omap_sb(buf, APFS_BLOCK_SIZE * VOLUME_OMAP_BLOCK, VOLUME_OMAP_OBJECT_ID, CURRENT_CHECKPOINT_XID, VOLUME_OMAP_ROOT_BLOCK)
+    omap_leaf(buf, APFS_BLOCK_SIZE * VOLUME_OMAP_ROOT_BLOCK, VOLUME_OMAP_ROOT_BLOCK, CURRENT_CHECKPOINT_XID, [(FS_TREE_OBJECT_ID, CURRENT_CHECKPOINT_XID, 0, root_tree_block)], root=True)
+    variable_root_leaf(buf, APFS_BLOCK_SIZE * root_tree_block, FS_TREE_OBJECT_ID, CURRENT_CHECKPOINT_XID, OBJ_TYPE_FS, sorted_records)
+    wa(buf, APFS_BLOCK_SIZE * alpha_data_blocks[0], ALPHA_EXTENT1)
+    wa(buf, APFS_BLOCK_SIZE * alpha_data_blocks[1], ALPHA_EXTENT2)
+    wa(buf, APFS_BLOCK_SIZE * note_data_block, NOTE_TEXT)
+    wbytes(buf, APFS_BLOCK_SIZE * relative_link_data_block, relative_link_target)
+    wbytes(buf, APFS_BLOCK_SIZE * absolute_link_data_block, absolute_link_target)
+    wbytes(buf, APFS_BLOCK_SIZE * broken_link_data_block, broken_link_target)
+    wbytes(buf, APFS_BLOCK_SIZE * hard_link_data_block, hard_link_text)
+    return bytes(buf)
+
 (samples_dir / "plain-user-data.img").write_bytes(build_direct())
 (samples_dir / "gpt-user-data.img").write_bytes(build_gpt())
 (samples_dir / "snapshot-volume.img").write_bytes(build_direct(volume_name="Snapshot Data", incompat=VOL_INCOMPAT_CASE_INSENSITIVE | VOL_INCOMPAT_DATALLESS_SNAPS))
 (samples_dir / "sealed-system.img").write_bytes(build_direct(volume_name="System", incompat=VOL_INCOMPAT_CASE_INSENSITIVE | VOL_INCOMPAT_SEALED, role=VOL_ROLE_SYSTEM))
 (samples_dir / "explorer-large.img").write_bytes(build_explorer_stress())
+(samples_dir / "link-behavior.img").write_bytes(build_link_behavior())
 '@
 
 $python | python - $samplesDir

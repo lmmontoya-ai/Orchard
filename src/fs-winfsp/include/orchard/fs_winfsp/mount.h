@@ -9,6 +9,7 @@
 
 #include "orchard/apfs/discovery.h"
 #include "orchard/apfs/format.h"
+#include "orchard/apfs/link_read.h"
 #include "orchard/apfs/volume.h"
 #include "orchard/blockio/inspection_target.h"
 #include "orchard/blockio/reader.h"
@@ -53,6 +54,7 @@ public:
   ListDirectoryEntries(std::uint64_t directory_inode_id) const;
   [[nodiscard]] blockio::Result<std::vector<std::uint8_t>>
   ReadFileRange(const orchard::apfs::FileReadRequest& request) const;
+  [[nodiscard]] blockio::Result<std::string> ReadSymlinkTarget(std::uint64_t inode_id) const;
 
   [[nodiscard]] blockio::Result<std::shared_ptr<FileNode>>
   AcquireOpenNode(std::string_view normalized_path);

@@ -75,6 +75,21 @@
       "feature_flags": ["synthetic", "direct_container", "large_directory", "explorer_stress"],
       "expected_policy": "MountReadWrite",
       "notes": "Synthetic APFS-like volume with a large directory, nested folder, and larger regular file used for WinFsp read-path and shell smoke hardening."
+    },
+    {
+      "id": "link-behavior-synthetic",
+      "label": "Link behavior synthetic volume",
+      "source_type": "image_file",
+      "relative_path": "tests/corpus/samples/link-behavior.img",
+      "volume_role": "user_data",
+      "case_mode": "case_insensitive",
+      "encryption": "none",
+      "snapshots": "absent",
+      "system_volume_group": "none",
+      "compression_algorithms": ["none"],
+      "feature_flags": ["synthetic", "direct_container", "symlink_read", "hard_link_preservation"],
+      "expected_policy": "MountReadWrite",
+      "notes": "Synthetic APFS-like volume with relative, absolute, and broken symlinks plus hard-link aliases used for M2-T04 link behavior validation."
     }
   ]
 }

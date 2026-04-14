@@ -52,6 +52,18 @@ if(DEFINED EXPECTED_PARTITION_NAME)
   list(APPEND required_fragments "\"name\": \"${EXPECTED_PARTITION_NAME}\"")
 endif()
 
+if(DEFINED EXPECTED_SYMLINK_TARGET)
+  list(APPEND required_fragments "\"symlink_target\": \"${EXPECTED_SYMLINK_TARGET}\"")
+endif()
+
+if(DEFINED EXPECTED_ALIAS)
+  list(APPEND required_fragments "\"${EXPECTED_ALIAS}\"")
+endif()
+
+if(DEFINED EXPECTED_LINK_COUNT)
+  list(APPEND required_fragments "\"link_count\": ${EXPECTED_LINK_COUNT}")
+endif()
+
 foreach(required_fragment IN LISTS required_fragments)
   string(FIND "${inspect_output}" "${required_fragment}" match_position)
   if(match_position EQUAL -1)

@@ -17,6 +17,7 @@
 #include "orchard/apfs/file_read.h"
 #include "orchard/apfs/fs_keys.h"
 #include "orchard/apfs/inspection.h"
+#include "orchard/apfs/link_read.h"
 #include "orchard/apfs/object.h"
 #include "orchard/apfs/omap.h"
 #include "orchard/apfs/path_lookup.h"
@@ -28,6 +29,7 @@
 #include "orchard/fs_winfsp/file_info.h"
 #include "orchard/fs_winfsp/mount.h"
 #include "orchard/fs_winfsp/path_bridge.h"
+#include "orchard/fs_winfsp/reparse.h"
 #include "orchard_test/test.h"
 
 namespace {
@@ -928,11 +930,14 @@ void InspectTargetUsesRealReaderPathAndEnrichesOutput() {
                        orchard::apfs::MountDisposition::kMountReadWrite);
   ORCHARD_TEST_REQUIRE(result.report.containers[0].volumes[0].root_entries.size() == 4U);
   ORCHARD_TEST_REQUIRE(result.report.containers[0].volumes[0].root_entries[0].name == "alpha.txt");
-  ORCHARD_TEST_REQUIRE(result.report.containers[0].volumes[0].root_file_probes.size() == 2U);
+  ORCHARD_TEST_REQUIRE(result.report.containers[0].volumes[0].root_file_probes.size() >= 2U);
   ORCHARD_TEST_REQUIRE(result.report.containers[0].volumes[0].root_file_probes[0].path ==
                        "/alpha.txt");
-  ORCHARD_TEST_REQUIRE(result.report.containers[0].volumes[0].root_file_probes[1].compression ==
-                       "decmpfs_uncompressed_attribute");
+  ORCHARD_TEST_REQUIRE(std::any_of(result.report.containers[0].volumes[0].root_file_probes.begin(),
+                                   result.report.containers[0].volumes[0].root_file_probes.end(),
+                                   [](const orchard::apfs::FileProbeInfo& probe) {
+                                     return probe.compression == "decmpfs_uncompressed_attribute";
+                                   }));
 
   std::filesystem::remove(temp_path);
 }
@@ -1122,6 +1127,143 @@ void LargeFixtureSupportsLargeDirectoryPathLookupAndFileRead() {
                        "ORCHARD-COPY-BLOCK-00\n");
 }
 
+void LinkFixtureSupportsSymlinkTargetsAndHardLinks() {
+  auto loaded = LoadVolumeContextFromPath(SampleFixturePath("link-behavior.img"));
+  auto& volume = loaded.volume;
+
+  const auto relative_link_lookup = orchard::apfs::LookupPath(volume, "/a-relative-note-link.txt");
+  ORCHARD_TEST_REQUIRE(relative_link_lookup.ok());
+  ORCHARD_TEST_REQUIRE(relative_link_lookup.value().inode.kind ==
+                       orchard::apfs::InodeKind::kSymlink);
+
+  const auto relative_target = orchard::apfs::ReadSymlinkTarget(
+      volume, relative_link_lookup.value().inode.key.header.object_id);
+  ORCHARD_TEST_REQUIRE(relative_target.ok());
+  ORCHARD_TEST_REQUIRE(relative_target.value() == "docs/note.txt");
+
+  const auto absolute_link_lookup = orchard::apfs::LookupPath(volume, "/absolute-alpha-link.txt");
+  ORCHARD_TEST_REQUIRE(absolute_link_lookup.ok());
+  const auto absolute_target = orchard::apfs::ReadSymlinkTarget(
+      volume, absolute_link_lookup.value().inode.key.header.object_id);
+  ORCHARD_TEST_REQUIRE(absolute_target.ok());
+  ORCHARD_TEST_REQUIRE(absolute_target.value() == "/alpha.txt");
+
+  const auto hard_a_lookup = orchard::apfs::LookupPath(volume, "/hard-a.txt");
+  ORCHARD_TEST_REQUIRE(hard_a_lookup.ok());
+  const auto hard_b_lookup = orchard::apfs::LookupPath(volume, "/hard-b.txt");
+  ORCHARD_TEST_REQUIRE(hard_b_lookup.ok());
+  ORCHARD_TEST_REQUIRE(hard_a_lookup.value().inode.key.header.object_id ==
+                       hard_b_lookup.value().inode.key.header.object_id);
+  ORCHARD_TEST_REQUIRE(hard_a_lookup.value().inode.link_count == 2U);
+  ORCHARD_TEST_REQUIRE(hard_b_lookup.value().inode.link_count == 2U);
+
+  const auto hard_a_bytes =
+      orchard::apfs::ReadWholeFile(volume, hard_a_lookup.value().inode.key.header.object_id);
+  ORCHARD_TEST_REQUIRE(hard_a_bytes.ok());
+  ORCHARD_TEST_REQUIRE(std::string(hard_a_bytes.value().begin(), hard_a_bytes.value().end()) ==
+                       "Shared hard-link payload\n");
+
+  const auto note_lookup = orchard::apfs::LookupPath(volume, "/docs/note.txt");
+  ORCHARD_TEST_REQUIRE(note_lookup.ok());
+  const auto note_alias_lookup = orchard::apfs::LookupPath(volume, "/note-link.txt");
+  ORCHARD_TEST_REQUIRE(note_alias_lookup.ok());
+  ORCHARD_TEST_REQUIRE(note_lookup.value().inode.key.header.object_id ==
+                       note_alias_lookup.value().inode.key.header.object_id);
+  ORCHARD_TEST_REQUIRE(note_lookup.value().inode.link_count == 2U);
+}
+
+void InspectTargetReportsLinkMetadata() {
+  const auto target_info =
+      orchard::blockio::InspectTargetPath(SampleFixturePath("link-behavior.img"));
+  const auto result = orchard::apfs::InspectTarget(target_info);
+
+  ORCHARD_TEST_REQUIRE(result.status == orchard::apfs::InspectionStatus::kSuccess);
+  ORCHARD_TEST_REQUIRE(result.report.containers.size() == 1U);
+  const auto& probes = result.report.containers[0].volumes[0].root_file_probes;
+  const auto symlink_probe =
+      std::find_if(probes.begin(), probes.end(), [](const orchard::apfs::FileProbeInfo& probe) {
+        return probe.path == "/a-relative-note-link.txt";
+      });
+  ORCHARD_TEST_REQUIRE(symlink_probe != probes.end());
+  ORCHARD_TEST_REQUIRE(symlink_probe->symlink_target.has_value());
+  const auto symlink_target = symlink_probe->symlink_target.value_or(std::string{});
+  ORCHARD_TEST_REQUIRE(symlink_target == "docs/note.txt");
+
+  const auto hard_link_probe =
+      std::find_if(probes.begin(), probes.end(), [](const orchard::apfs::FileProbeInfo& probe) {
+        return probe.path == "/hard-a.txt";
+      });
+  ORCHARD_TEST_REQUIRE(hard_link_probe != probes.end());
+  ORCHARD_TEST_REQUIRE(hard_link_probe->link_count == 2U);
+  ORCHARD_TEST_REQUIRE(std::find(hard_link_probe->aliases.begin(), hard_link_probe->aliases.end(),
+                                 "/hard-b.txt") != hard_link_probe->aliases.end());
+}
+
+void WinFspSymlinkReparseTranslationSupportsRelativeAndAbsoluteTargets() {
+  const auto relative_result =
+      orchard::fs_winfsp::TranslateSymlinkTarget(orchard::fs_winfsp::SymlinkReparseRequest{
+          .mount_point = L"R:",
+          .target = "docs/note.txt",
+      });
+  ORCHARD_TEST_REQUIRE(relative_result.ok());
+  ORCHARD_TEST_REQUIRE(relative_result.value().relative);
+  ORCHARD_TEST_REQUIRE(relative_result.value().print_name == L"docs\\note.txt");
+
+  const auto absolute_result =
+      orchard::fs_winfsp::TranslateSymlinkTarget(orchard::fs_winfsp::SymlinkReparseRequest{
+          .mount_point = L"R:",
+          .target = "/alpha.txt",
+      });
+  ORCHARD_TEST_REQUIRE(absolute_result.ok());
+  ORCHARD_TEST_REQUIRE(!absolute_result.value().relative);
+  ORCHARD_TEST_REQUIRE(absolute_result.value().print_name == L"R:\\alpha.txt");
+  ORCHARD_TEST_REQUIRE(absolute_result.value().substitute_name == L"\\??\\R:\\alpha.txt");
+
+  const auto invalid_result =
+      orchard::fs_winfsp::TranslateSymlinkTarget(orchard::fs_winfsp::SymlinkReparseRequest{
+          .mount_point = L"R:",
+          .target = "bad:name",
+      });
+  ORCHARD_TEST_REQUIRE(!invalid_result.ok());
+  ORCHARD_TEST_REQUIRE(invalid_result.error().code ==
+                       orchard::blockio::ErrorCode::kUnsupportedTarget);
+}
+
+void WinFspMountedVolumePreservesHardLinkIdentityAndSymlinkTargets() {
+  orchard::fs_winfsp::MountConfig config;
+  config.target_path = SampleFixturePath("link-behavior.img");
+  config.mount_point = L"W:";
+
+  const auto mounted_volume_result = orchard::fs_winfsp::OpenMountedVolume(config);
+  ORCHARD_TEST_REQUIRE(mounted_volume_result.ok());
+
+  const auto hard_a_result = mounted_volume_result.value()->ResolveFileNode("/hard-a.txt");
+  ORCHARD_TEST_REQUIRE(hard_a_result.ok());
+  const auto hard_b_result = mounted_volume_result.value()->ResolveFileNode("/hard-b.txt");
+  ORCHARD_TEST_REQUIRE(hard_b_result.ok());
+  ORCHARD_TEST_REQUIRE(hard_a_result.value().inode_id == hard_b_result.value().inode_id);
+
+  const auto hard_a_info = orchard::fs_winfsp::BuildBasicFileInfo(
+      hard_a_result.value(), mounted_volume_result.value()->volume_context().block_size());
+  const auto hard_b_info = orchard::fs_winfsp::BuildBasicFileInfo(
+      hard_b_result.value(), mounted_volume_result.value()->volume_context().block_size());
+  ORCHARD_TEST_REQUIRE(hard_a_info.index_number == hard_b_info.index_number);
+  ORCHARD_TEST_REQUIRE(hard_a_info.hard_links == 2U);
+  ORCHARD_TEST_REQUIRE(hard_b_info.hard_links == 2U);
+
+  const auto relative_link_result =
+      mounted_volume_result.value()->ResolveFileNode("/a-relative-note-link.txt");
+  ORCHARD_TEST_REQUIRE(relative_link_result.ok());
+  ORCHARD_TEST_REQUIRE(relative_link_result.value().symlink_target.has_value());
+  const auto relative_link_target =
+      relative_link_result.value().symlink_target.value_or(std::string{});
+  ORCHARD_TEST_REQUIRE(relative_link_target == "docs/note.txt");
+  const auto relative_link_info = orchard::fs_winfsp::BuildBasicFileInfo(
+      relative_link_result.value(), mounted_volume_result.value()->volume_context().block_size());
+  ORCHARD_TEST_REQUIRE((relative_link_info.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0U);
+  ORCHARD_TEST_REQUIRE(relative_link_info.reparse_tag == IO_REPARSE_TAG_SYMLINK);
+}
+
 void WinFspLargeDirectoryPaginationResumesDeterministically() {
   orchard::fs_winfsp::MountConfig config;
   config.target_path = SampleFixturePath("explorer-large.img");
@@ -1262,6 +1404,13 @@ int main() {
       {"WinFspMountedVolumeReusesOpenNodeIdentity", &WinFspMountedVolumeReusesOpenNodeIdentity},
       {"LargeFixtureSupportsLargeDirectoryPathLookupAndFileRead",
        &LargeFixtureSupportsLargeDirectoryPathLookupAndFileRead},
+      {"LinkFixtureSupportsSymlinkTargetsAndHardLinks",
+       &LinkFixtureSupportsSymlinkTargetsAndHardLinks},
+      {"InspectTargetReportsLinkMetadata", &InspectTargetReportsLinkMetadata},
+      {"WinFspSymlinkReparseTranslationSupportsRelativeAndAbsoluteTargets",
+       &WinFspSymlinkReparseTranslationSupportsRelativeAndAbsoluteTargets},
+      {"WinFspMountedVolumePreservesHardLinkIdentityAndSymlinkTargets",
+       &WinFspMountedVolumePreservesHardLinkIdentityAndSymlinkTargets},
       {"WinFspLargeDirectoryPaginationResumesDeterministically",
        &WinFspLargeDirectoryPaginationResumesDeterministically},
       {"WinFspMountedVolumeOpensSyntheticFixture", &WinFspMountedVolumeOpensSyntheticFixture},

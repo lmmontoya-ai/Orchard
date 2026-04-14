@@ -224,9 +224,20 @@ void PrintFileProbes(const std::vector<orchard::apfs::FileProbeInfo>& probes,
     std::cout << indent << "  \"inode_id\": " << probes[index].inode_id << ",\n";
     std::cout << indent << "  \"size_bytes\": " << probes[index].size_bytes << ",\n";
     std::cout << indent << "  \"kind\": \"" << EscapeJson(probes[index].kind) << "\",\n";
+    std::cout << indent << "  \"link_count\": " << probes[index].link_count << ",\n";
     std::cout << indent << "  \"compression\": \"" << EscapeJson(probes[index].compression)
               << "\",\n";
     std::cout << indent << "  \"sparse\": " << (probes[index].sparse ? "true" : "false") << ",\n";
+    std::cout << indent << "  \"symlink_target\": ";
+    if (probes[index].symlink_target.has_value()) {
+      std::cout << "\"" << EscapeJson(probes[index].symlink_target.value_or(std::string{})) << "\"";
+    } else {
+      std::cout << "null";
+    }
+    std::cout << ",\n";
+    std::cout << indent << "  \"aliases\": ";
+    PrintQuotedStringArray(probes[index].aliases, std::string(indent) + "    ");
+    std::cout << ",\n";
     std::cout << indent << "  \"preview_utf8\": \"" << EscapeJson(probes[index].preview_utf8)
               << "\",\n";
     std::cout << indent << "  \"preview_hex\": \"" << EscapeJson(probes[index].preview_hex)

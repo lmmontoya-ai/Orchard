@@ -4,6 +4,7 @@ set(ORCHARD_GPT_SAMPLE_IMAGE "${PROJECT_SOURCE_DIR}/tests/corpus/samples/gpt-use
 set(ORCHARD_SNAPSHOT_SAMPLE_IMAGE "${PROJECT_SOURCE_DIR}/tests/corpus/samples/snapshot-volume.img")
 set(ORCHARD_SEALED_SAMPLE_IMAGE "${PROJECT_SOURCE_DIR}/tests/corpus/samples/sealed-system.img")
 set(ORCHARD_EXPLORER_STRESS_SAMPLE_IMAGE "${PROJECT_SOURCE_DIR}/tests/corpus/samples/explorer-large.img")
+set(ORCHARD_LINK_BEHAVIOR_SAMPLE_IMAGE "${PROJECT_SOURCE_DIR}/tests/corpus/samples/link-behavior.img")
 
 add_test(
   NAME orchard_validate_fixture_manifest
@@ -68,5 +69,21 @@ add_test(
       "-DEXPECTED_VOLUME_NAME=Explorer Stress"
       "-DEXPECTED_PROBE_PATH=/alpha.txt"
       "-DEXPECTED_COMPRESSION=none"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/validate_orchard_inspect_output.cmake"
+)
+
+add_test(
+  NAME orchard_inspect_link_behavior_output
+  COMMAND
+    "${CMAKE_COMMAND}"
+      -DEXECUTABLE_PATH=$<TARGET_FILE:orchard_inspect>
+      -DTARGET_PATH=${ORCHARD_LINK_BEHAVIOR_SAMPLE_IMAGE}
+      -DEXPECTED_LAYOUT=direct_container
+      "-DEXPECTED_VOLUME_NAME=Link Behavior"
+      "-DEXPECTED_PROBE_PATH=/a-relative-note-link.txt"
+      "-DEXPECTED_COMPRESSION=none"
+      "-DEXPECTED_SYMLINK_TARGET=docs/note.txt"
+      "-DEXPECTED_ALIAS=/hard-b.txt"
+      "-DEXPECTED_LINK_COUNT=2"
       -P "${CMAKE_CURRENT_SOURCE_DIR}/validate_orchard_inspect_output.cmake"
 )

@@ -194,3 +194,25 @@ $env:WINFSP_ROOT_DIR = "$env:TEMP\winfsp-sdk\DYNAMIC"
   - clean timed unmount after validation
 - The PowerShell shell view listed `bulk items` before `alpha.txt` on the mounted root. That is a shell-ordering observation, not an APFS-directory sort guarantee; do not use shell-visible ordering as the only correctness oracle.
 - On `2026-04-13`, manual Explorer validation was observed on this machine: the mounted volume appeared in File Explorer and `copy-source.bin` was copied successfully to `C:\Users\luism\OneDrive\Escritorio`. That closes the remaining manual-evidence gap for `M2-T03`.
+- `M2-T04` adds a dedicated synthetic link corpus image at `tests/corpus/samples/link-behavior.img` with:
+  - a relative file symlink at `/a-relative-note-link.txt`
+  - an absolute file symlink at `/absolute-alpha-link.txt`
+  - a broken symlink at `/broken-link.txt`
+  - same-directory hard-link aliases at `/hard-a.txt` and `/hard-b.txt`
+  - a cross-directory hard-link alias at `/note-link.txt` for `/docs/note.txt`
+- `src/apfs-core/include/orchard/apfs/link_read.h` is now the dedicated APFS-core API for link semantics. Keep WinFsp-specific reparse handling in `src/fs-winfsp/src/reparse.cpp`; do not push Windows reparse structures back into `apfs-core`.
+- Local `M2-T04` mounted link smoke is now in `tools/dev/orchard-winfsp-link-smoke.ps1`. On this machine it passed with:
+
+```powershell
+$env:PATH = "C:\Users\luism\AppData\Roaming\Python\Python311\Scripts;C:\Users\luism\miniconda3\Library\bin;C:\Users\luism\miniconda3\Library\x86_64-w64-mingw32\bin;$env:PATH"
+$env:WINFSP_ROOT_DIR = "$env:TEMP\winfsp-sdk\DYNAMIC"
+.\tools\dev\orchard-winfsp-link-smoke.ps1
+```
+
+- The automated `M2-T04` link smoke observed:
+  - `ReadOnly, ReparsePoint` attributes on both mounted symlink files
+  - `Nested note` read successfully through `/a-relative-note-link.txt`
+  - `Hello Orchard` read successfully through `/absolute-alpha-link.txt`
+  - matching hashes for `/hard-a.txt` and `/hard-b.txt`
+  - `Nested note` read successfully through the cross-directory alias `/note-link.txt`
+  - clean failure when attempting to read `/broken-link.txt`

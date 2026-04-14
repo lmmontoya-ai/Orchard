@@ -9,6 +9,7 @@ add_library(
     src/fs_records.cpp
     src/format.cpp
     src/inspection.cpp
+    src/link_read.cpp
     src/object.cpp
     src/omap.cpp
     src/path_lookup.cpp

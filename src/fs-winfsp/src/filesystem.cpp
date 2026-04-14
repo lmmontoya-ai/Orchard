@@ -15,6 +15,7 @@
 #include "orchard/fs_winfsp/directory_query.h"
 #include "orchard/fs_winfsp/file_info.h"
 #include "orchard/fs_winfsp/path_bridge.h"
+#include "orchard/fs_winfsp/reparse.h"
 
 namespace orchard::fs_winfsp {
 namespace {
@@ -60,6 +61,23 @@ UINT64 GetCurrentSystemTime() noexcept {
 
 NTSTATUS ReadOnlyNtStatus() noexcept {
   return STATUS_MEDIA_WRITE_PROTECTED;
+}
+
+NTSTATUS CopyOwnedBuffer(const std::vector<std::uint8_t>& source, PVOID buffer,
+                         PSIZE_T size) noexcept {
+  if (size == nullptr) {
+    return STATUS_INVALID_PARAMETER;
+  }
+  if (buffer == nullptr || *size < source.size()) {
+    *size = source.size();
+    return STATUS_BUFFER_TOO_SMALL;
+  }
+
+  if (!source.empty()) {
+    std::memcpy(buffer, source.data(), source.size());
+  }
+  *size = source.size();
+  return STATUS_SUCCESS;
 }
 
 void CopyBasicFileInfo(const BasicFileInfo& source, FSP_FSCTL_FILE_INFO& destination) noexcept {
@@ -171,6 +189,20 @@ private:
   static NTSTATUS SetSecurity(FSP_FILE_SYSTEM* file_system, PVOID file_context,
                               SECURITY_INFORMATION security_information,
                               PSECURITY_DESCRIPTOR modification_descriptor) noexcept;
+  static NTSTATUS ResolveReparsePoints(FSP_FILE_SYSTEM* file_system, PWSTR file_name,
+                                       UINT32 reparse_point_index,
+                                       BOOLEAN resolve_last_path_component,
+                                       PIO_STATUS_BLOCK io_status, PVOID buffer,
+                                       PSIZE_T size) noexcept;
+  static NTSTATUS GetReparsePointByName(FSP_FILE_SYSTEM* file_system, PVOID context,
+                                        PWSTR file_name, BOOLEAN is_directory, PVOID buffer,
+                                        PSIZE_T size) noexcept;
+  static NTSTATUS GetReparsePoint(FSP_FILE_SYSTEM* file_system, PVOID file_context, PWSTR file_name,
+                                  PVOID buffer, PSIZE_T size) noexcept;
+  static NTSTATUS SetReparsePoint(FSP_FILE_SYSTEM* file_system, PVOID file_context, PWSTR file_name,
+                                  PVOID buffer, SIZE_T size) noexcept;
+  static NTSTATUS DeleteReparsePoint(FSP_FILE_SYSTEM* file_system, PVOID file_context,
+                                     PWSTR file_name, PVOID buffer, SIZE_T size) noexcept;
   static NTSTATUS ReadDirectory(FSP_FILE_SYSTEM* file_system, PVOID file_context, PWSTR pattern,
                                 PWSTR marker, PVOID buffer, ULONG length,
                                 PULONG bytes_transferred) noexcept;
@@ -232,6 +264,10 @@ blockio::Result<MountSessionHandle> WinFspMountSession::Start(const MountConfig&
     value.Rename = &WinFspMountSession::Rename;
     value.GetSecurity = &WinFspMountSession::GetSecurity;
     value.SetSecurity = &WinFspMountSession::SetSecurity;
+    value.ResolveReparsePoints = &WinFspMountSession::ResolveReparsePoints;
+    value.GetReparsePoint = &WinFspMountSession::GetReparsePoint;
+    value.SetReparsePoint = &WinFspMountSession::SetReparsePoint;
+    value.DeleteReparsePoint = &WinFspMountSession::DeleteReparsePoint;
     value.ReadDirectory = &WinFspMountSession::ReadDirectory;
     return value;
   }();
@@ -384,11 +420,6 @@ NTSTATUS WinFspMountSession::Open(FSP_FILE_SYSTEM* file_system, PWSTR file_name,
     session->mounted_volume().ReleaseOpenNode(node_result.value().get());
     return STATUS_FILE_IS_A_DIRECTORY;
   }
-  if (node.metadata.kind == orchard::apfs::InodeKind::kSymlink) {
-    session->mounted_volume().ReleaseOpenNode(node_result.value().get());
-    return STATUS_NOT_SUPPORTED;
-  }
-
   *file_context = node_result.value().get();
   CopyBasicFileInfo(
       BuildBasicFileInfo(node, session->mounted_volume().volume_context().block_size()),
@@ -450,6 +481,9 @@ NTSTATUS WinFspMountSession::Read(FSP_FILE_SYSTEM* file_system, PVOID file_conte
 
   if (node_result.value()->metadata.kind == orchard::apfs::InodeKind::kDirectory) {
     return STATUS_FILE_IS_A_DIRECTORY;
+  }
+  if (node_result.value()->metadata.kind == orchard::apfs::InodeKind::kSymlink) {
+    return STATUS_INVALID_DEVICE_REQUEST;
   }
   *bytes_transferred = 0U;
   if (length == 0U) {
@@ -592,6 +626,117 @@ NTSTATUS WinFspMountSession::SetSecurity(FSP_FILE_SYSTEM* file_system, PVOID fil
   static_cast<void>(file_context);
   static_cast<void>(security_information);
   static_cast<void>(modification_descriptor);
+  return ReadOnlyNtStatus();
+}
+
+NTSTATUS WinFspMountSession::ResolveReparsePoints(FSP_FILE_SYSTEM* file_system, PWSTR file_name,
+                                                  const UINT32 reparse_point_index,
+                                                  const BOOLEAN resolve_last_path_component,
+                                                  PIO_STATUS_BLOCK io_status, PVOID buffer,
+                                                  PSIZE_T size) noexcept {
+  auto* session = FromFileSystem(file_system);
+  return ::FspFileSystemResolveReparsePoints(
+      file_system, &WinFspMountSession::GetReparsePointByName, session, file_name,
+      reparse_point_index, resolve_last_path_component, io_status, buffer, size);
+}
+
+NTSTATUS WinFspMountSession::GetReparsePointByName(FSP_FILE_SYSTEM* file_system, PVOID context,
+                                                   PWSTR file_name, BOOLEAN is_directory,
+                                                   PVOID buffer, PSIZE_T size) noexcept {
+  static_cast<void>(file_system);
+  static_cast<void>(is_directory);
+
+  auto* session = static_cast<WinFspMountSession*>(context);
+  auto node_result = ResolveNodeFromWidePath(session->mounted_volume(), file_name);
+  if (!node_result.ok()) {
+    return MapErrorToNtStatus(node_result.error());
+  }
+  const auto& symlink_target_opt = node_result.value().symlink_target;
+  if (node_result.value().metadata.kind != orchard::apfs::InodeKind::kSymlink ||
+      !symlink_target_opt.has_value()) {
+    return STATUS_NOT_A_REPARSE_POINT;
+  }
+  const auto symlink_target = symlink_target_opt.value();
+
+  auto reparse_result = BuildSymlinkReparseData(SymlinkReparseRequest{
+      .mount_point = std::wstring(session->mount_point()),
+      .target = symlink_target,
+  });
+  if (!reparse_result.ok()) {
+    return MapErrorToNtStatus(reparse_result.error());
+  }
+  if (buffer == nullptr) {
+    if (size != nullptr) {
+      *size = reparse_result.value().size();
+    }
+    return STATUS_SUCCESS;
+  }
+
+  return CopyOwnedBuffer(reparse_result.value(), buffer, size);
+}
+
+NTSTATUS WinFspMountSession::GetReparsePoint(FSP_FILE_SYSTEM* file_system, PVOID file_context,
+                                             PWSTR file_name, PVOID buffer, PSIZE_T size) noexcept {
+  auto* session = FromFileSystem(file_system);
+  const auto missing_context_error = orchard::apfs::MakeApfsError(
+      blockio::ErrorCode::kInvalidArgument, "Missing file context for reparse query.");
+  blockio::Result<std::shared_ptr<FileNode>> node_result(missing_context_error);
+  if (file_context != nullptr) {
+    node_result = session->AcquireNodeFromFileContext(file_context);
+  }
+  if (file_context == nullptr) {
+    auto normalized_path_result = NormalizeWindowsPath(file_name);
+    if (!normalized_path_result.ok()) {
+      return MapErrorToNtStatus(normalized_path_result.error());
+    }
+    node_result = session->mounted_volume().AcquireOpenNode(normalized_path_result.value());
+  }
+  if (!node_result.ok()) {
+    return file_context != nullptr ? STATUS_INVALID_HANDLE
+                                   : MapErrorToNtStatus(node_result.error());
+  }
+  const auto& symlink_target_opt = node_result.value()->symlink_target;
+  if (node_result.value()->metadata.kind != orchard::apfs::InodeKind::kSymlink ||
+      !symlink_target_opt.has_value()) {
+    if (file_context == nullptr) {
+      session->mounted_volume().ReleaseOpenNode(node_result.value().get());
+    }
+    return STATUS_NOT_A_REPARSE_POINT;
+  }
+  const auto symlink_target = symlink_target_opt.value();
+
+  auto reparse_result = BuildSymlinkReparseData(SymlinkReparseRequest{
+      .mount_point = std::wstring(session->mount_point()),
+      .target = symlink_target,
+  });
+  if (file_context == nullptr) {
+    session->mounted_volume().ReleaseOpenNode(node_result.value().get());
+  }
+  if (!reparse_result.ok()) {
+    return MapErrorToNtStatus(reparse_result.error());
+  }
+
+  return CopyOwnedBuffer(reparse_result.value(), buffer, size);
+}
+
+NTSTATUS WinFspMountSession::SetReparsePoint(FSP_FILE_SYSTEM* file_system, PVOID file_context,
+                                             PWSTR file_name, PVOID buffer, SIZE_T size) noexcept {
+  static_cast<void>(file_system);
+  static_cast<void>(file_context);
+  static_cast<void>(file_name);
+  static_cast<void>(buffer);
+  static_cast<void>(size);
+  return ReadOnlyNtStatus();
+}
+
+NTSTATUS WinFspMountSession::DeleteReparsePoint(FSP_FILE_SYSTEM* file_system, PVOID file_context,
+                                                PWSTR file_name, PVOID buffer,
+                                                SIZE_T size) noexcept {
+  static_cast<void>(file_system);
+  static_cast<void>(file_context);
+  static_cast<void>(file_name);
+  static_cast<void>(buffer);
+  static_cast<void>(size);
   return ReadOnlyNtStatus();
 }
 

@@ -3,6 +3,7 @@ set(_orchard_winfsp_sources
   src/file_info.cpp
   src/mount.cpp
   src/path_bridge.cpp
+  src/reparse.cpp
 )
 
 set(_orchard_winfsp_public_headers
@@ -11,6 +12,7 @@ set(_orchard_winfsp_public_headers
   include/orchard/fs_winfsp/filesystem.h
   include/orchard/fs_winfsp/mount.h
   include/orchard/fs_winfsp/path_bridge.h
+  include/orchard/fs_winfsp/reparse.h
   include/orchard/fs_winfsp/types.h
 )
 

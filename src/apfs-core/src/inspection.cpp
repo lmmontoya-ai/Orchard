@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "orchard/apfs/file_read.h"
+#include "orchard/apfs/link_read.h"
 #include "orchard/apfs/object.h"
 #include "orchard/apfs/omap.h"
 #include "orchard/apfs/path_lookup.h"
@@ -90,7 +91,7 @@ void PopulateFileProbes(VolumeInfo& volume, const VolumeContext& context,
   volume.root_file_probes.clear();
 
   for (const auto& entry : entries) {
-    if (!IsRegularFile(entry.kind)) {
+    if (entry.kind == InodeKind::kDirectory) {
       continue;
     }
 
@@ -100,16 +101,40 @@ void PopulateFileProbes(VolumeInfo& volume, const VolumeContext& context,
       continue;
     }
 
-    const auto preview_size = static_cast<std::size_t>(
-        std::min<std::uint64_t>(metadata_result.value().logical_size, 24U));
-    auto bytes_result = ReadFileRange(context, FileReadRequest{
-                                                   .inode_id = entry.file_id,
-                                                   .offset = 0U,
-                                                   .size = preview_size,
-                                               });
-    if (!bytes_result.ok()) {
-      volume.notes.push_back(bytes_result.error().message);
-      continue;
+    std::optional<std::string> symlink_target;
+    std::string preview_utf8;
+    std::string preview_hex;
+    if (entry.kind == InodeKind::kSymlink) {
+      auto target_result = ReadSymlinkTarget(context, entry.file_id);
+      if (!target_result.ok()) {
+        volume.notes.push_back(target_result.error().message);
+        continue;
+      }
+      symlink_target = std::move(target_result.value());
+      preview_utf8 = *symlink_target;
+      preview_hex = ToHexPreview(std::span<const std::uint8_t>(
+          reinterpret_cast<const std::uint8_t*>(symlink_target->data()), symlink_target->size()));
+    } else {
+      const auto preview_size = static_cast<std::size_t>(
+          std::min<std::uint64_t>(metadata_result.value().logical_size, 24U));
+      auto bytes_result = ReadFileRange(context, FileReadRequest{
+                                                     .inode_id = entry.file_id,
+                                                     .offset = 0U,
+                                                     .size = preview_size,
+                                                 });
+      if (!bytes_result.ok()) {
+        volume.notes.push_back(bytes_result.error().message);
+        continue;
+      }
+      preview_utf8 = ToUtf8Preview(bytes_result.value());
+      preview_hex = ToHexPreview(bytes_result.value());
+    }
+
+    std::vector<std::string> aliases;
+    for (const auto& other_entry : entries) {
+      if (other_entry.file_id == entry.file_id && other_entry.key.name != entry.key.name) {
+        aliases.push_back("/" + other_entry.key.name);
+      }
     }
 
     volume.root_file_probes.push_back(FileProbeInfo{
@@ -117,13 +142,16 @@ void PopulateFileProbes(VolumeInfo& volume, const VolumeContext& context,
         .inode_id = entry.file_id,
         .size_bytes = metadata_result.value().logical_size,
         .kind = std::string(ToString(entry.kind)),
+        .link_count = metadata_result.value().link_count,
         .compression = std::string(ToString(metadata_result.value().compression.kind)),
         .sparse = metadata_result.value().sparse,
-        .preview_utf8 = ToUtf8Preview(bytes_result.value()),
-        .preview_hex = ToHexPreview(bytes_result.value()),
+        .symlink_target = std::move(symlink_target),
+        .aliases = std::move(aliases),
+        .preview_utf8 = std::move(preview_utf8),
+        .preview_hex = std::move(preview_hex),
     });
 
-    if (volume.root_file_probes.size() >= 2U) {
+    if (volume.root_file_probes.size() >= 8U) {
       break;
     }
   }

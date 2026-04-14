@@ -409,6 +409,7 @@ A task is only `Done` when all apply:
   - The validated M2 smoke path uses a drive-letter mount (`R:`). A directory mountpoint attempt failed at `FspFileSystemSetMountPoint` and remains follow-up work outside `M2-T01`.
   - `M2-T02` hardened query mapping by expanding APFS-side metadata, centralizing APFS-to-Windows file-info translation, making path normalization reject unsupported Windows syntax explicitly, and extracting deterministic directory query filtering into a dedicated helper.
 - `M2-T03` has automated shell-stress coverage in place, including a large-directory synthetic fixture, WinFsp-side directory pagination helpers, and a dedicated PowerShell smoke script. On `2026-04-13`, manual Explorer validation was also observed: the mounted volume appeared in File Explorer and `copy-source.bin` was copied successfully to `C:\Users\luism\OneDrive\Escritorio`.
+- `M2-T04` now adds a dedicated link-behavior fixture, an APFS-core link reader API, WinFsp reparse-point translation, and a mounted link smoke path. On `2026-04-13`, local verification observed relative and absolute symlink traversal, hard-link alias reads, and clean failure for a broken symlink through the mounted drive.
 
 ### Tasks
 
@@ -433,11 +434,12 @@ A task is only `Done` when all apply:
   Verification: Manual and automated shell smoke tests.
   Evidence: `tests/corpus/generate-sample-fixtures.ps1` now emits `tests/corpus/samples/explorer-large.img`, a synthetic stress volume with a multi-leaf filesystem tree, a 181-entry directory, nested subdirectory content, and a larger regular file for copy-out; `tests/corpus/manifests/sample-fixtures.json` and `tests/integration/CMakeLists.txt` now include the stress fixture and inspect validation; `src/fs-winfsp/src/directory_query.cpp` now exposes deterministic paging through `PaginateDirectoryQueryEntries`, and `src/fs-winfsp/src/filesystem.cpp` uses that paging helper plus explicit `STATUS_BUFFER_TOO_SMALL` handling for undersized directory buffers; `src/fs-winfsp/src/mount.cpp` now canonicalizes open-node cache keys after lookup so case-insensitive repeated opens reuse the same node identity; `tests/unit/apfs_tests.cpp` covers large-directory path lookup, large-file reads, case-variant node reuse, and marker/resume paging across the stress fixture; `tools/dev/orchard-winfsp-shell-smoke.ps1` mounts the stress fixture, validates repeated root and large-directory listings, nested preview reads, copy-out hash equality, and clean unmount; on `2026-04-13` the user confirmed the mounted volume appeared in File Explorer and copied `copy-source.bin` successfully to `C:\Users\luism\OneDrive\Escritorio`.
 
-- [ ] `M2-T04` Symlink and hard-link read behavior
-  Status: `Planned`
+- [x] `M2-T04` Symlink and hard-link read behavior
+  Status: `Done`
   Depends on: `M2-T02`
   Done when: Existing symlinks and hard links behave consistently with v1 support policy.
-  Verification: Metadata integration tests.
+  Verification: Metadata integration tests and mounted link smoke tests.
+  Evidence: `tests/corpus/generate-sample-fixtures.ps1` now emits `tests/corpus/samples/link-behavior.img`, a synthetic APFS-like volume containing relative, absolute, and broken symlinks plus same-directory and cross-directory hard-link aliases; `tests/corpus/manifests/sample-fixtures.json` and `tests/integration/CMakeLists.txt` now include the link fixture and inspect validation; `src/apfs-core/include/orchard/apfs/link_read.h` and `src/apfs-core/src/link_read.cpp` now expose a dedicated, Windows-agnostic symlink-target and link-info API; `src/apfs-core/src/inspection.cpp`, `src/apfs-core/include/orchard/apfs/discovery.h`, and `tools/inspect/src/main.cpp` now surface `link_count`, `symlink_target`, and visible alias paths in `orchard-inspect`; `src/fs-winfsp/include/orchard/fs_winfsp/reparse.h` and `src/fs-winfsp/src/reparse.cpp` now translate APFS symlink targets into Windows reparse data; `src/fs-winfsp/src/filesystem.cpp` now implements `ResolveReparsePoints` and `GetReparsePoint`, removes the blanket symlink-open rejection, and keeps reparse writes fail-closed; `tests/unit/apfs_tests.cpp` covers symlink target parsing, inspect link metadata, reparse translation, and hard-link identity mapping; local verification passed with `11/11` tests, `clang-format check passed for 58 file(s)`, `clang-tidy passed for 32 translation unit(s)`, and `tools/dev/orchard-winfsp-link-smoke.ps1`, which mounted `link-behavior.img` at `R:`, observed `ReadOnly, ReparsePoint` attributes on both symlink files, read `Nested note` through the relative symlink, read `Hello Orchard` through the absolute symlink, confirmed matching hard-link hashes, read the cross-directory alias, and observed clean failure on the broken symlink.
 
 - [ ] `M2-T05` Read-only mount stress baseline
   Status: `Planned`
@@ -755,4 +757,5 @@ Start here once implementation begins:
 - [x] `NOW-12` Start `M2-T01` WinFsp read-only adapter skeleton on top of the offline reader core
 - [x] `NOW-13` Start `M2-T02` file and directory query mapping hardening on top of the mounted adapter
 - [x] `NOW-14` Finish `M2-T03` by recording manual Explorer browse/open/copy-out validation on top of the new shell-stress coverage
-- [ ] `NOW-15` Start `M2-T04` symlink and hard-link read behavior on top of the hardened read-only mount path
+- [x] `NOW-15` Start `M2-T04` symlink and hard-link read behavior on top of the hardened read-only mount path
+- [ ] `NOW-16` Start `M2-T05` read-only mount stress baseline on top of the completed link-aware read path

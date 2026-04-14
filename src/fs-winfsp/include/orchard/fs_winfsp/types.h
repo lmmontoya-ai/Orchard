@@ -30,6 +30,7 @@ struct FileNode {
   std::uint64_t parent_inode_id = 0;
   std::string normalized_path;
   orchard::apfs::FileMetadata metadata;
+  std::optional<std::string> symlink_target;
 };
 
 struct BasicFileInfo {

@@ -48,8 +48,11 @@ struct FileProbeInfo {
   std::uint64_t inode_id = 0;
   std::uint64_t size_bytes = 0;
   std::string kind;
+  std::uint32_t link_count = 0;
   std::string compression;
   bool sparse = false;
+  std::optional<std::string> symlink_target;
+  std::vector<std::string> aliases;
   std::string preview_utf8;
   std::string preview_hex;
 };

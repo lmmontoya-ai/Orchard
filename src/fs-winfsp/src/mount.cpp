@@ -211,6 +211,14 @@ blockio::Result<FileNode> MountedVolume::ResolveFileNode(std::string_view normal
   node.parent_inode_id = lookup_result.value().inode.parent_id;
   node.normalized_path = lookup_result.value().normalized_path;
   node.metadata = metadata_result.value();
+  if (node.metadata.kind == orchard::apfs::InodeKind::kSymlink) {
+    auto target_result = orchard::apfs::ReadSymlinkTarget(
+        context_, lookup_result.value().inode.key.header.object_id);
+    if (!target_result.ok()) {
+      return target_result.error();
+    }
+    node.symlink_target = std::move(target_result.value());
+  }
   return node;
 }
 
@@ -222,6 +230,10 @@ MountedVolume::ListDirectoryEntries(const std::uint64_t directory_inode_id) cons
 blockio::Result<std::vector<std::uint8_t>>
 MountedVolume::ReadFileRange(const orchard::apfs::FileReadRequest& request) const {
   return orchard::apfs::ReadFileRange(context_, request);
+}
+
+blockio::Result<std::string> MountedVolume::ReadSymlinkTarget(const std::uint64_t inode_id) const {
+  return orchard::apfs::ReadSymlinkTarget(context_, inode_id);
 }
 
 blockio::Result<std::shared_ptr<FileNode>>
