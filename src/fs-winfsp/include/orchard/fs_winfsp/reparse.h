@@ -19,8 +19,7 @@ struct WindowsSymlinkTarget {
   bool relative = false;
 };
 
-blockio::Result<WindowsSymlinkTarget>
-TranslateSymlinkTarget(const SymlinkReparseRequest& request);
+blockio::Result<WindowsSymlinkTarget> TranslateSymlinkTarget(const SymlinkReparseRequest& request);
 blockio::Result<std::vector<std::uint8_t>>
 BuildSymlinkReparseData(const SymlinkReparseRequest& request);
 

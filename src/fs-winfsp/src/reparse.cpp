@@ -73,8 +73,7 @@ blockio::Result<std::wstring> NormalizeApfsSymlinkTarget(const std::string_view 
 
 std::wstring NormalizeMountRoot(std::wstring mount_point) {
   std::replace(mount_point.begin(), mount_point.end(), L'/', L'\\');
-  while (!mount_point.empty() &&
-         (mount_point.back() == L'\\' || mount_point.back() == L'/') &&
+  while (!mount_point.empty() && (mount_point.back() == L'\\' || mount_point.back() == L'/') &&
          !(mount_point.size() == 3U && mount_point[1] == L':')) {
     mount_point.pop_back();
   }
@@ -88,8 +87,7 @@ std::wstring NormalizeMountRoot(std::wstring mount_point) {
 
 } // namespace
 
-blockio::Result<WindowsSymlinkTarget>
-TranslateSymlinkTarget(const SymlinkReparseRequest& request) {
+blockio::Result<WindowsSymlinkTarget> TranslateSymlinkTarget(const SymlinkReparseRequest& request) {
   auto normalized_target_result = NormalizeApfsSymlinkTarget(request.target);
   if (!normalized_target_result.ok()) {
     return normalized_target_result.error();
@@ -135,13 +133,14 @@ BuildSymlinkReparseData(const SymlinkReparseRequest& request) {
       translated.substitute_name.size() * sizeof(std::wstring::value_type);
   const auto print_bytes = translated.print_name.size() * sizeof(std::wstring::value_type);
   const auto path_buffer_bytes = substitute_bytes + print_bytes;
-  const auto total_bytes = offsetof(OrchardSymbolicLinkReparseBuffer, path_buffer) + path_buffer_bytes;
+  const auto total_bytes =
+      offsetof(OrchardSymbolicLinkReparseBuffer, path_buffer) + path_buffer_bytes;
 
   std::vector<std::uint8_t> bytes(total_bytes, 0U);
   auto* buffer = reinterpret_cast<OrchardSymbolicLinkReparseBuffer*>(bytes.data());
   buffer->reparse_tag = kIoReparseTagSymlink;
-  buffer->reparse_data_length =
-      static_cast<std::uint16_t>(total_bytes - offsetof(OrchardSymbolicLinkReparseBuffer, substitute_name_offset));
+  buffer->reparse_data_length = static_cast<std::uint16_t>(
+      total_bytes - offsetof(OrchardSymbolicLinkReparseBuffer, substitute_name_offset));
   buffer->reserved = 0U;
   buffer->substitute_name_offset = 0U;
   buffer->substitute_name_length = static_cast<std::uint16_t>(substitute_bytes);

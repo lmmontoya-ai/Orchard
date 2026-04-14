@@ -5,6 +5,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "orchard/fs_winfsp/mount.h"
 #include "orchard/fs_winfsp/path_bridge.h"
@@ -26,7 +27,8 @@ BOOL WINAPI ConsoleControlHandler(const DWORD signal) {
 
 void PrintUsage() {
   std::cerr << "Usage: orchard-mount-smoke --target <path> --mountpoint <X:|dir> "
-               "[--volume-name <name>] [--volume-oid <id>] [--hold-ms <milliseconds>]\n";
+               "[--volume-name <name>] [--volume-oid <id>] [--hold-ms <milliseconds>] "
+               "[--shutdown-event <name>]\n";
 }
 
 std::optional<std::uint64_t> ParseUint64(const std::string_view text) {
@@ -47,6 +49,7 @@ std::optional<std::uint64_t> ParseUint64(const std::string_view text) {
 int main(int argc, char** argv) {
   orchard::fs_winfsp::MountConfig config;
   std::optional<DWORD> hold_timeout_ms;
+  std::optional<std::wstring> shutdown_event_name;
 
   for (int index = 1; index < argc; ++index) {
     const std::string_view argument(argv[index]);
@@ -86,6 +89,16 @@ int main(int argc, char** argv) {
       hold_timeout_ms = static_cast<DWORD>(*value);
       continue;
     }
+    if (argument == "--shutdown-event" && index + 1 < argc) {
+      const auto wide_result = orchard::fs_winfsp::Utf8ToWide(argv[index + 1]);
+      if (!wide_result.ok()) {
+        std::cerr << "Invalid UTF-8 shutdown event name.\n";
+        return 1;
+      }
+      shutdown_event_name = wide_result.value();
+      ++index;
+      continue;
+    }
 
     PrintUsage();
     return 1;
@@ -113,11 +126,37 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  HANDLE external_shutdown_event = nullptr;
+  if (shutdown_event_name.has_value()) {
+    external_shutdown_event = ::CreateEventW(nullptr, TRUE, FALSE, shutdown_event_name->c_str());
+    if (external_shutdown_event == nullptr) {
+      std::cerr << "Failed to create or open the external shutdown event.\n";
+      mount_result.value()->Stop();
+      return 1;
+    }
+  }
+
   ::SetConsoleCtrlHandler(&ConsoleControlHandler, TRUE);
-  ::WaitForSingleObject(g_shutdown_event, hold_timeout_ms.value_or(INFINITE));
+  std::vector<HANDLE> wait_handles{g_shutdown_event};
+  if (external_shutdown_event != nullptr) {
+    wait_handles.push_back(external_shutdown_event);
+  }
+
+  const auto wait_result =
+      ::WaitForMultipleObjects(static_cast<DWORD>(wait_handles.size()), wait_handles.data(), FALSE,
+                               hold_timeout_ms.value_or(INFINITE));
   ::SetConsoleCtrlHandler(&ConsoleControlHandler, FALSE);
+  if (external_shutdown_event != nullptr) {
+    ::CloseHandle(external_shutdown_event);
+  }
   ::CloseHandle(g_shutdown_event);
   g_shutdown_event = nullptr;
+
+  if (wait_result == WAIT_FAILED) {
+    std::cerr << "Failed while waiting for shutdown.\n";
+    mount_result.value()->Stop();
+    return 1;
+  }
 
   mount_result.value()->Stop();
   return 0;

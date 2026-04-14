@@ -216,3 +216,21 @@ $env:WINFSP_ROOT_DIR = "$env:TEMP\winfsp-sdk\DYNAMIC"
   - matching hashes for `/hard-a.txt` and `/hard-b.txt`
   - `Nested note` read successfully through the cross-directory alias `/note-link.txt`
   - clean failure when attempting to read `/broken-link.txt`
+- `tools/mount-smoke/src/main.cpp` now accepts `--shutdown-event <name>` in addition to `--hold-ms`. Use the named-event path for automated stress runs so the caller can request graceful unmount and measure teardown time directly instead of waiting for the fixed hold timeout.
+- `tools/dev/OrchardWinFspTestCommon.ps1` is now the shared helper for WinFsp smoke tooling. Keep drive-letter selection, mount startup, telemetry capture, and unmount verification there; keep scenario-specific filesystem assertions in the individual smoke scripts.
+- Local `M2-T05` soak verification is now in `tools/dev/orchard-winfsp-soak.ps1`. On this machine it passed with:
+
+```powershell
+$env:PATH = "C:\Users\luism\AppData\Roaming\Python\Python311\Scripts;C:\Users\luism\miniconda3\Library\bin;C:\Users\luism\miniconda3\Library\x86_64-w64-mingw32\bin;$env:PATH"
+$env:WINFSP_ROOT_DIR = "$env:TEMP\winfsp-sdk\DYNAMIC"
+.\tools\dev\orchard-winfsp-soak.ps1 -Cycles 25
+```
+
+- The automated `M2-T05` soak observed:
+  - 25 successful mount/browse/unmount cycles on each of `plain-user-data.img`, `explorer-large.img`, and `link-behavior.img`
+  - max mount/unmount latencies of `378/268 ms` on `plain-user-data`
+  - max mount/unmount latencies of `324/268 ms` on `explorer-large`
+  - max mount/unmount latencies of `316/266 ms` on `link-behavior`
+  - max handle counts of `148`, `148`, and `147` respectively
+  - max private bytes of `3100672`, `2854912`, and `2809856` respectively
+  - no stale drive letters after unmount, no timeout-triggered hangs, and no copy-out/hash mismatches during the soak run
