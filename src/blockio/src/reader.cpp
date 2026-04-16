@@ -274,13 +274,20 @@ Result<std::vector<std::uint8_t>> ReadExact(const Reader& reader, const ReadRequ
     return bytes;
   }
 
-  auto read_result = reader.ReadAt(request.offset, bytes);
-  if (!read_result.ok()) {
-    return read_result.error();
-  }
+  std::size_t bytes_read_total = 0U;
+  while (bytes_read_total < request.size) {
+    auto read_result = reader.ReadAt(
+        request.offset + bytes_read_total,
+        std::span<std::uint8_t>(bytes.data() + static_cast<std::ptrdiff_t>(bytes_read_total),
+                                request.size - bytes_read_total));
+    if (!read_result.ok()) {
+      return read_result.error();
+    }
+    if (read_result.value() == 0U) {
+      return MakeError(ErrorCode::kShortRead, "ReadAt returned fewer bytes than requested.");
+    }
 
-  if (read_result.value() != request.size) {
-    return MakeError(ErrorCode::kShortRead, "ReadAt returned fewer bytes than requested.");
+    bytes_read_total += read_result.value();
   }
 
   return bytes;

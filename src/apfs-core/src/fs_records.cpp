@@ -16,6 +16,9 @@ constexpr std::size_t kSyntheticXattrDataOffset = 8U;
 constexpr std::size_t kXfieldDescriptorSize = 4U;
 constexpr std::uint8_t kInodeXfieldTypeDstream = 8U;
 constexpr std::size_t kDstreamMinimumSize = 16U;
+constexpr std::uint64_t kFileExtentLengthMask = 0x00FFFFFFFFFFFFFFULL;
+constexpr std::uint64_t kFileExtentFlagMask = 0xFF00000000000000ULL;
+constexpr std::uint32_t kFileExtentFlagShift = 56U;
 
 std::size_t AlignToEight(const std::size_t value) noexcept {
   return (value + 7U) & ~static_cast<std::size_t>(7U);
@@ -185,6 +188,7 @@ ParseDirectoryEntryRecord(const FsTreeRecordView& record_view) {
       .key = key_result.value(),
       .file_id = ReadLe64(record_view.value, 0x00U),
       .flags = ReadLe16(record_view.value, flags_offset),
+      .inode = std::nullopt,
   };
 }
 
@@ -198,11 +202,12 @@ blockio::Result<FileExtentRecord> ParseFileExtentRecord(const FsTreeRecordView& 
                          "Synthetic APFS file extent value is too small.");
   }
 
+  const auto length_and_flags = ReadLe64(record_view.value, 0x00U);
   return FileExtentRecord{
       .key = key_result.value(),
-      .length = ReadLe64(record_view.value, 0x00U),
+      .length = length_and_flags & kFileExtentLengthMask,
       .physical_block = ReadLe64(record_view.value, 0x08U),
-      .flags = ReadLe64(record_view.value, 0x10U),
+      .flags = (length_and_flags & kFileExtentFlagMask) >> kFileExtentFlagShift,
   };
 }
 

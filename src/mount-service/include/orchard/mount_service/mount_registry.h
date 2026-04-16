@@ -22,6 +22,7 @@ public:
   [[nodiscard]] virtual std::wstring_view volume_label() const noexcept = 0;
   [[nodiscard]] virtual std::uint64_t volume_object_id() const noexcept = 0;
   [[nodiscard]] virtual std::string_view volume_name() const noexcept = 0;
+  [[nodiscard]] virtual MountedSessionPerformanceRecord performance() const noexcept = 0;
   virtual void Stop() noexcept = 0;
 };
 
@@ -56,6 +57,7 @@ private:
   };
 
   [[nodiscard]] std::wstring AllocateMountId();
+  [[nodiscard]] static MountedSessionRecord SnapshotActiveMount(const ActiveMount& active_mount);
 
   std::unique_ptr<MountSessionFactory> factory_;
   mutable std::mutex mutex_;

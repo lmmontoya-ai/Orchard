@@ -132,7 +132,9 @@ BuildSymlinkReparseData(const SymlinkReparseRequest& request) {
   const auto substitute_bytes =
       translated.substitute_name.size() * sizeof(std::wstring::value_type);
   const auto print_bytes = translated.print_name.size() * sizeof(std::wstring::value_type);
-  const auto path_buffer_bytes = substitute_bytes + print_bytes;
+  const auto terminator_bytes = sizeof(std::wstring::value_type);
+  const auto path_buffer_bytes =
+      substitute_bytes + terminator_bytes + print_bytes + terminator_bytes;
   const auto total_bytes =
       offsetof(OrchardSymbolicLinkReparseBuffer, path_buffer) + path_buffer_bytes;
 
@@ -144,7 +146,7 @@ BuildSymlinkReparseData(const SymlinkReparseRequest& request) {
   buffer->reserved = 0U;
   buffer->substitute_name_offset = 0U;
   buffer->substitute_name_length = static_cast<std::uint16_t>(substitute_bytes);
-  buffer->print_name_offset = static_cast<std::uint16_t>(substitute_bytes);
+  buffer->print_name_offset = static_cast<std::uint16_t>(substitute_bytes + terminator_bytes);
   buffer->print_name_length = static_cast<std::uint16_t>(print_bytes);
   buffer->flags = translated.relative ? kSymlinkFlagRelative : 0U;
 

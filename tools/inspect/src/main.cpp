@@ -7,8 +7,13 @@
 
 #include "orchard/apfs/discovery.h"
 #include "orchard/apfs/inspection.h"
+#include "orchard/apfs/object.h"
+#include "orchard/apfs/omap.h"
+#include "orchard/apfs/path_lookup.h"
+#include "orchard/apfs/volume.h"
 #include "orchard/blockio/error.h"
 #include "orchard/blockio/inspection_target.h"
+#include "orchard/blockio/reader.h"
 
 namespace {
 
@@ -48,15 +53,30 @@ std::string ToHexString(const std::uint64_t value) {
   return stream.str();
 }
 
+std::string ToHexPreview(const std::span<const std::uint8_t> bytes) {
+  static constexpr char kHexDigits[] = "0123456789ABCDEF";
+  std::string text;
+  text.reserve(bytes.size() * 2U);
+
+  for (const auto value : bytes) {
+    text.push_back(kHexDigits[(value >> 4U) & 0x0FU]);
+    text.push_back(kHexDigits[value & 0x0FU]);
+  }
+
+  return text;
+}
+
 struct CommandLineOptions {
   std::string target;
+  std::optional<std::string> list_path;
   orchard::apfs::InspectionOptions inspection;
 };
 
 void PrintUsage(const std::string_view program_name) {
   std::cout << "Usage: " << program_name << " --target <path> [--enrich-raw]"
-            << " [--volume-oid <id>]\n";
-  std::cout << "   or: " << program_name << " <path> [--enrich-raw] [--volume-oid <id>]\n";
+            << " [--volume-oid <id>] [--list-path <orchard-path>]\n";
+  std::cout << "   or: " << program_name
+            << " <path> [--enrich-raw] [--volume-oid <id>] [--list-path <orchard-path>]\n";
 }
 
 std::optional<std::uint64_t> ParseUint64(const std::string_view text) {
@@ -103,6 +123,13 @@ std::optional<CommandLineOptions> ParseCommandLine(int argc, char** argv) {
       }
       options.inspection.enrich_raw_device_volumes = true;
       options.inspection.volume_object_id = *parsed;
+      continue;
+    }
+    if (argument == "--list-path") {
+      if (index + 1 >= argc) {
+        return std::nullopt;
+      }
+      options.list_path = std::string(argv[++index]);
       continue;
     }
     if (!target_consumed && !argument.starts_with("-")) {
@@ -464,8 +491,158 @@ void PrintContainers(const std::vector<orchard::apfs::ContainerInfo>& containers
   std::cout << "]";
 }
 
+struct PathListingEntry {
+  std::string name;
+  std::string name_hex;
+  std::uint64_t inode_id = 0;
+  std::string kind;
+};
+
+struct PathListingResult {
+  std::string requested_path;
+  std::string normalized_path;
+  std::vector<PathListingEntry> entries;
+  std::optional<orchard::blockio::Error> error;
+};
+
+std::string ToHexFromStringBytes(const std::string_view text) {
+  std::vector<std::uint8_t> bytes(text.begin(), text.end());
+  return ToHexPreview(bytes);
+}
+
+const orchard::apfs::ContainerInfo* SelectContainer(const orchard::apfs::DiscoveryReport& report) {
+  if (report.containers.empty()) {
+    return nullptr;
+  }
+  return &report.containers.front();
+}
+
+const orchard::apfs::VolumeInfo* SelectVolume(const orchard::apfs::ContainerInfo& container,
+                                              const orchard::apfs::InspectionOptions& options) {
+  if (!options.volume_object_id.has_value()) {
+    return container.volumes.empty() ? nullptr : &container.volumes.front();
+  }
+
+  const auto it = std::find_if(container.volumes.begin(), container.volumes.end(),
+                               [&options](const orchard::apfs::VolumeInfo& volume) {
+                                 return volume.object_id == options.volume_object_id.value_or(0U);
+                               });
+  return it == container.volumes.end() ? nullptr : &(*it);
+}
+
+std::optional<PathListingResult>
+LoadPathListing(const orchard::blockio::InspectionTargetInfo& target_info,
+                const CommandLineOptions& options) {
+  if (!options.list_path.has_value()) {
+    return std::nullopt;
+  }
+
+  PathListingResult listing;
+  listing.requested_path = *options.list_path;
+
+  auto reader_result = orchard::blockio::OpenReader(target_info);
+  if (!reader_result.ok()) {
+    listing.error = reader_result.error();
+    return listing;
+  }
+
+  auto reader = std::move(reader_result).value();
+  auto discovery_result = orchard::apfs::Discover(*reader);
+  if (!discovery_result.ok()) {
+    listing.error = discovery_result.error();
+    return listing;
+  }
+
+  const auto* container = SelectContainer(discovery_result.value());
+  if (container == nullptr) {
+    listing.error = orchard::blockio::Error{
+        .code = orchard::blockio::ErrorCode::kNotFound,
+        .message = "No APFS container was found for path listing.",
+    };
+    return listing;
+  }
+
+  const auto* volume = SelectVolume(*container, options.inspection);
+  if (volume == nullptr) {
+    listing.error = orchard::blockio::Error{
+        .code = orchard::blockio::ErrorCode::kNotFound,
+        .message = "Requested APFS volume was not found for path listing.",
+    };
+    return listing;
+  }
+
+  orchard::apfs::PhysicalObjectReader object_reader(*reader, container->byte_offset,
+                                                    container->block_size);
+  auto container_omap_result =
+      orchard::apfs::OmapResolver::Load(object_reader, container->omap_oid);
+  if (!container_omap_result.ok()) {
+    listing.error = container_omap_result.error();
+    return listing;
+  }
+
+  auto volume_result = orchard::apfs::VolumeContext::Load(*reader, *container, *volume,
+                                                          container_omap_result.value());
+  if (!volume_result.ok()) {
+    listing.error = volume_result.error();
+    return listing;
+  }
+
+  auto path_result = orchard::apfs::LookupPath(volume_result.value(), *options.list_path);
+  if (!path_result.ok()) {
+    listing.error = path_result.error();
+    return listing;
+  }
+  listing.normalized_path = path_result.value().normalized_path;
+
+  auto entries_result = orchard::apfs::ListDirectory(
+      volume_result.value(), path_result.value().inode.key.header.object_id);
+  if (!entries_result.ok()) {
+    listing.error = entries_result.error();
+    return listing;
+  }
+
+  listing.entries.reserve(entries_result.value().size());
+  for (const auto& entry : entries_result.value()) {
+    listing.entries.push_back(PathListingEntry{
+        .name = entry.key.name,
+        .name_hex = ToHexFromStringBytes(entry.key.name),
+        .inode_id = entry.file_id,
+        .kind = std::string(orchard::apfs::ToString(entry.kind)),
+    });
+  }
+
+  return listing;
+}
+
+void PrintPathListingEntryArray(const std::vector<PathListingEntry>& entries,
+                                const std::string_view indent) {
+  std::cout << "[";
+  if (!entries.empty()) {
+    std::cout << "\n";
+  }
+
+  for (std::size_t index = 0; index < entries.size(); ++index) {
+    std::cout << indent << "{\n";
+    std::cout << indent << "  \"name\": \"" << EscapeJson(entries[index].name) << "\",\n";
+    std::cout << indent << "  \"name_hex\": \"" << EscapeJson(entries[index].name_hex) << "\",\n";
+    std::cout << indent << "  \"inode_id\": " << entries[index].inode_id << ",\n";
+    std::cout << indent << "  \"kind\": \"" << EscapeJson(entries[index].kind) << "\"\n";
+    std::cout << indent << "}";
+    if (index + 1U != entries.size()) {
+      std::cout << ",";
+    }
+    std::cout << "\n";
+  }
+
+  if (!entries.empty()) {
+    std::cout << std::string(indent.substr(0, indent.size() - 2U));
+  }
+  std::cout << "]";
+}
+
 void PrintJson(const orchard::blockio::InspectionTargetInfo& target_info,
-               const orchard::apfs::InspectionResult& inspection_result) {
+               const orchard::apfs::InspectionResult& inspection_result,
+               const std::optional<PathListingResult>& path_listing) {
   std::cout << "{\n";
   std::cout << "  \"tool\": \"orchard-inspect\",\n";
   std::cout << "  \"version\": \"" << EscapeJson(ORCHARD_VERSION) << "\",\n";
@@ -521,7 +698,24 @@ void PrintJson(const orchard::blockio::InspectionTargetInfo& target_info,
   std::cout << "    \"notes\": ";
   PrintQuotedStringArray(inspection_result.notes, "      ");
   std::cout << "\n";
-  std::cout << "  }\n";
+  std::cout << "  },\n";
+  std::cout << "  \"path_listing\": ";
+  if (!path_listing.has_value()) {
+    std::cout << "null\n";
+  } else {
+    std::cout << "{\n";
+    std::cout << "    \"requested_path\": \"" << EscapeJson(path_listing->requested_path)
+              << "\",\n";
+    std::cout << "    \"normalized_path\": \"" << EscapeJson(path_listing->normalized_path)
+              << "\",\n";
+    std::cout << "    \"error\": ";
+    PrintErrorObject(path_listing->error, "      ");
+    std::cout << ",\n";
+    std::cout << "    \"entries\": ";
+    PrintPathListingEntryArray(path_listing->entries, "      ");
+    std::cout << "\n";
+    std::cout << "  }\n";
+  }
   std::cout << "}\n";
 }
 
@@ -546,6 +740,7 @@ int main(int argc, char** argv) {
   const auto target_path = std::filesystem::path(options->target);
   const auto target_info = orchard::blockio::InspectTargetPath(target_path);
   const auto inspection_result = orchard::apfs::InspectTarget(target_info, options->inspection);
-  PrintJson(target_info, inspection_result);
+  const auto path_listing = LoadPathListing(target_info, *options);
+  PrintJson(target_info, inspection_result, path_listing);
   return 0;
 }

@@ -2,11 +2,23 @@
 
 #include <algorithm>
 #include <limits>
+#include <mutex>
 
 #include "orchard/apfs/fs_search.h"
 
 namespace orchard::apfs {
 namespace {
+
+constexpr std::size_t kTargetBlockCacheBytes = 32U * 1024U * 1024U;
+
+std::size_t ComputeBlockCacheCapacityBlocks(const std::uint32_t block_size) {
+  if (block_size == 0U) {
+    return 0U;
+  }
+
+  const auto target_blocks = kTargetBlockCacheBytes / static_cast<std::size_t>(block_size);
+  return std::max<std::size_t>(target_blocks, 256U);
+}
 
 blockio::Result<std::uint64_t> ComputeAbsoluteByteOffset(const VolumeRuntimeConfig& runtime,
                                                          const PhysicalReadRequest& request) {
@@ -100,7 +112,11 @@ VolumeContext::VolumeContext(const blockio::Reader& reader, const VolumeRuntimeC
     : reader_(&reader), container_byte_offset_(runtime.container_byte_offset),
       block_size_(runtime.block_size), xid_limit_(runtime.xid_limit), info_(std::move(info)),
       root_tree_block_index_(tree_blocks.root_tree_block_index),
-      volume_omap_block_index_(tree_blocks.volume_omap_block_index) {}
+      volume_omap_block_index_(tree_blocks.volume_omap_block_index),
+      block_cache_(std::make_shared<PhysicalBlockCache>(
+          ComputeBlockCacheCapacityBlocks(runtime.block_size))),
+      performance_(std::make_shared<PerformanceState>()),
+      inode_cache_(std::make_shared<InodeCacheState>()) {}
 
 blockio::Result<VolumeContext> VolumeContext::Load(const blockio::Reader& reader,
                                                    const ContainerInfo& container,
@@ -149,7 +165,7 @@ blockio::Result<VolumeContext> VolumeContext::Load(const blockio::Reader& reader
 }
 
 PhysicalObjectReader VolumeContext::MakeObjectReader() const {
-  return PhysicalObjectReader(*reader_, container_byte_offset_, block_size_);
+  return PhysicalObjectReader(*reader_, container_byte_offset_, block_size_, block_cache_);
 }
 
 blockio::Result<std::size_t>
@@ -264,6 +280,22 @@ VolumeContext::LowerBoundFilesystemRecord(const BtreeWalker::CompareFn& compare)
 }
 
 blockio::Result<InodeRecord> VolumeContext::GetInode(const std::uint64_t inode_id) const {
+  {
+    std::scoped_lock lock(inode_cache_->mutex);
+    const auto existing = inode_cache_->entries.find(inode_id);
+    if (existing != inode_cache_->entries.end()) {
+      if (performance_) {
+        std::scoped_lock performance_lock(performance_->mutex);
+        ++performance_->inode_cache_hits;
+      }
+      return existing->second;
+    }
+  }
+  if (performance_) {
+    std::scoped_lock performance_lock(performance_->mutex);
+    ++performance_->inode_cache_misses;
+  }
+
   auto record_result = LowerBoundFilesystemRecord(MakeInodeLowerBoundCompare(inode_id));
   if (!record_result.ok()) {
     return record_result.error();
@@ -284,10 +316,19 @@ blockio::Result<InodeRecord> VolumeContext::GetInode(const std::uint64_t inode_i
                          "Filesystem tree did not contain the requested inode.");
   }
 
-  return ParseInodeRecord(FsTreeRecordView{
+  auto inode_result = ParseInodeRecord(FsTreeRecordView{
       .key = std::span<const std::uint8_t>(record_copy.key.data(), record_copy.key.size()),
       .value = std::span<const std::uint8_t>(record_copy.value.data(), record_copy.value.size()),
   });
+  if (!inode_result.ok()) {
+    return inode_result.error();
+  }
+
+  {
+    std::scoped_lock lock(inode_cache_->mutex);
+    inode_cache_->entries.insert_or_assign(inode_id, inode_result.value());
+  }
+  return inode_result.value();
 }
 
 blockio::Result<std::vector<DirectoryEntryRecord>>
@@ -321,6 +362,7 @@ VolumeContext::ListDirectoryEntries(const std::uint64_t directory_inode_id) cons
   for (auto& entry : entries) {
     auto inode_result = GetInode(entry.file_id);
     if (inode_result.ok()) {
+      entry.inode = inode_result.value();
       entry.kind = inode_result.value().kind;
     }
   }
@@ -414,19 +456,119 @@ VolumeContext::FindXattr(const std::uint64_t inode_id, const std::string_view na
 
 blockio::Result<std::vector<std::uint8_t>>
 VolumeContext::ReadPhysicalBytes(const PhysicalReadRequest& request) const {
-  auto absolute_offset_result = ComputeAbsoluteByteOffset(
-      VolumeRuntimeConfig{
-          .container_byte_offset = container_byte_offset_,
-          .block_size = block_size_,
-          .xid_limit = xid_limit_,
-      },
-      request);
-  if (!absolute_offset_result.ok()) {
-    return absolute_offset_result.error();
+  if (request.size == 0U) {
+    return std::vector<std::uint8_t>{};
+  }
+  if (block_size_ == 0U) {
+    return MakeApfsError(blockio::ErrorCode::kInvalidArgument,
+                         "APFS volume block size is not initialized.");
+  }
+  if (request.block_offset >= block_size_) {
+    return MakeApfsError(blockio::ErrorCode::kOutOfRange,
+                         "Physical read block offset exceeds the APFS block size.");
   }
 
-  return blockio::ReadExact(*reader_, blockio::ReadRequest{.offset = absolute_offset_result.value(),
-                                                           .size = request.size});
+  constexpr auto kMaxUint64 = std::numeric_limits<std::uint64_t>::max();
+  if (request.block_offset > kMaxUint64 - static_cast<std::uint64_t>(request.size)) {
+    return MakeApfsError(blockio::ErrorCode::kOutOfRange,
+                         "Physical read request length would overflow the APFS block range.");
+  }
+
+  const auto covered_bytes = request.block_offset + static_cast<std::uint64_t>(request.size);
+  const auto aligned_block_count =
+      (covered_bytes + static_cast<std::uint64_t>(block_size_) - 1U) / block_size_;
+  if (aligned_block_count > (kMaxUint64 / static_cast<std::uint64_t>(block_size_))) {
+    return MakeApfsError(blockio::ErrorCode::kOutOfRange,
+                         "Aligned physical read would overflow the APFS block range.");
+  }
+  if (aligned_block_count != 0U &&
+      request.physical_block_index > kMaxUint64 - (aligned_block_count - 1U)) {
+    return MakeApfsError(blockio::ErrorCode::kOutOfRange,
+                         "Aligned physical read would overflow the APFS block range.");
+  }
+
+  const auto aligned_size_u64 = aligned_block_count * static_cast<std::uint64_t>(block_size_);
+  if (aligned_size_u64 > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+    return MakeApfsError(blockio::ErrorCode::kOutOfRange,
+                         "Aligned physical read exceeds the supported in-memory size.");
+  }
+
+  std::vector<std::uint8_t> aligned_bytes;
+  if (block_cache_) {
+    auto aligned_bytes_result = block_cache_->ReadBlocks(
+        *reader_, container_byte_offset_, block_size_, request.physical_block_index,
+        static_cast<std::size_t>(aligned_block_count), PhysicalBlockAccessKind::kFileData);
+    if (!aligned_bytes_result.ok()) {
+      return aligned_bytes_result.error();
+    }
+    aligned_bytes = std::move(aligned_bytes_result.value());
+  } else {
+    aligned_bytes.assign(static_cast<std::size_t>(aligned_size_u64), 0U);
+    for (std::uint64_t block_offset_index = 0U; block_offset_index < aligned_block_count;
+         ++block_offset_index) {
+      const auto physical_block_index = request.physical_block_index + block_offset_index;
+
+      auto absolute_offset_result = ComputeAbsoluteByteOffset(
+          VolumeRuntimeConfig{
+              .container_byte_offset = container_byte_offset_,
+              .block_size = block_size_,
+              .xid_limit = xid_limit_,
+          },
+          PhysicalReadRequest{
+              .physical_block_index = physical_block_index,
+              .block_offset = 0U,
+              .size = block_size_,
+          });
+      if (!absolute_offset_result.ok()) {
+        return absolute_offset_result.error();
+      }
+
+      auto block_bytes_result = blockio::ReadExact(
+          *reader_,
+          blockio::ReadRequest{.offset = absolute_offset_result.value(), .size = block_size_});
+      if (!block_bytes_result.ok()) {
+        return block_bytes_result.error();
+      }
+
+      const auto destination_offset =
+          static_cast<std::size_t>(block_offset_index * static_cast<std::uint64_t>(block_size_));
+      std::copy(block_bytes_result.value().begin(), block_bytes_result.value().end(),
+                aligned_bytes.begin() + static_cast<std::ptrdiff_t>(destination_offset));
+    }
+  }
+
+  const auto slice_start = static_cast<std::size_t>(request.block_offset);
+  const auto slice_end = slice_start + request.size;
+  return std::vector<std::uint8_t>(aligned_bytes.begin() + static_cast<std::ptrdiff_t>(slice_start),
+                                   aligned_bytes.begin() + static_cast<std::ptrdiff_t>(slice_end));
+}
+
+VolumePerformanceStats VolumeContext::performance_stats() const {
+  VolumePerformanceStats stats;
+  if (performance_) {
+    std::scoped_lock lock(performance_->mutex);
+    stats.path_lookup_calls = performance_->path_lookup_calls;
+    stats.path_components_walked = performance_->path_components_walked;
+    stats.path_directory_enumerations = performance_->path_directory_enumerations;
+    stats.inode_cache_hits = performance_->inode_cache_hits;
+    stats.inode_cache_misses = performance_->inode_cache_misses;
+  }
+  if (block_cache_) {
+    stats.block_cache = block_cache_->stats();
+  }
+  return stats;
+}
+
+void VolumeContext::RecordPathLookup(const std::size_t component_count,
+                                     const std::size_t directory_enumerations) const {
+  if (!performance_) {
+    return;
+  }
+
+  std::scoped_lock lock(performance_->mutex);
+  ++performance_->path_lookup_calls;
+  performance_->path_components_walked += component_count;
+  performance_->path_directory_enumerations += directory_enumerations;
 }
 
 } // namespace orchard::apfs

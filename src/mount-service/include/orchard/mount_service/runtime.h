@@ -54,6 +54,7 @@ private:
   [[nodiscard]] blockio::Result<ServiceStateSnapshot> TransitionState(ServiceState next_state,
                                                                       std::uint32_t wait_hint_ms);
   [[nodiscard]] bool IsRunning() const noexcept;
+  [[nodiscard]] bool HasStarted() const noexcept;
 
   ServiceConfig config_;
   MountRegistry registry_;

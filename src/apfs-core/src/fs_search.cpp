@@ -28,26 +28,26 @@ BtreeWalker::CompareFn MakeInodeLowerBoundCompare(const std::uint64_t inode_id) 
 
 BtreeWalker::CompareFn
 MakeDirectoryRecordLowerBoundCompare(const std::uint64_t directory_inode_id) {
-  return
-      [directory_inode_id](const std::span<const std::uint8_t> key_bytes) -> blockio::Result<int> {
-        auto key_result = ParseDirectoryRecordKey(key_bytes);
-        if (key_result.ok()) {
-          if (key_result.value().header.object_id != directory_inode_id) {
-            return key_result.value().header.object_id < directory_inode_id ? -1 : 1;
-          }
-          return key_result.value().name.empty() ? 0 : 1;
-        }
+  return [directory_inode_id](
+             const std::span<const std::uint8_t> key_bytes) -> blockio::Result<int> {
+    auto key_result = ParseDirectoryRecordKey(key_bytes);
+    if (key_result.ok()) {
+      if (key_result.value().header.object_id != directory_inode_id) {
+        return key_result.value().header.object_id < directory_inode_id ? -1 : 1;
+      }
+      return key_result.value().name.empty() ? 0 : 1;
+    }
 
-        if (key_result.error().code != blockio::ErrorCode::kCorruptData) {
-          return key_result.error();
-        }
+    if (key_result.error().code != blockio::ErrorCode::kCorruptData) {
+      return key_result.error();
+    }
 
-        auto header_result = ParseFsKeyHeader(key_bytes);
-        if (!header_result.ok()) {
-          return header_result.error();
-        }
-        return CompareFsKeyPrefix(header_result.value(), directory_inode_id, FsRecordType::kDirRecord);
-      };
+    auto header_result = ParseFsKeyHeader(key_bytes);
+    if (!header_result.ok()) {
+      return header_result.error();
+    }
+    return CompareFsKeyPrefix(header_result.value(), directory_inode_id, FsRecordType::kDirRecord);
+  };
 }
 
 BtreeWalker::CompareFn MakeFileExtentLowerBoundCompare(const std::uint64_t inode_id,

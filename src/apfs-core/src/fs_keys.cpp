@@ -78,9 +78,9 @@ ParseDirectoryRecordKey(const std::span<const std::uint8_t> bytes) {
                          "Filesystem-tree directory record key advertises the wrong type.");
   }
 
-  auto name_result = ParseNamedKeyString(bytes, "directory record");
-  if (!name_result.ok() && bytes.size() >= 13U) {
-    name_result = ParseHashedDirectoryKeyString(bytes);
+  auto name_result = ParseHashedDirectoryKeyString(bytes);
+  if (!name_result.ok()) {
+    name_result = ParseNamedKeyString(bytes, "directory record");
   }
   if (!name_result.ok()) {
     return name_result.error();

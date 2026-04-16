@@ -31,6 +31,8 @@ struct FileNode {
   std::string normalized_path;
   orchard::apfs::FileMetadata metadata;
   std::optional<std::string> symlink_target;
+  bool symlink_reparse_eligible = false;
+  bool metadata_complete = false;
 };
 
 struct BasicFileInfo {

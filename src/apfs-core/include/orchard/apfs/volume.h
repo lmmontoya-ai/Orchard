@@ -2,8 +2,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include "orchard/apfs/discovery.h"
@@ -22,6 +25,15 @@ struct PhysicalReadRequest {
   std::uint64_t physical_block_index = 0;
   std::uint64_t block_offset = 0;
   std::size_t size = 0;
+};
+
+struct VolumePerformanceStats {
+  std::uint64_t path_lookup_calls = 0;
+  std::uint64_t path_components_walked = 0;
+  std::uint64_t path_directory_enumerations = 0;
+  std::uint64_t inode_cache_hits = 0;
+  std::uint64_t inode_cache_misses = 0;
+  PhysicalBlockCacheStats block_cache;
 };
 
 class VolumeContext {
@@ -55,11 +67,27 @@ public:
                                                                       std::string_view name) const;
   [[nodiscard]] blockio::Result<std::vector<std::uint8_t>>
   ReadPhysicalBytes(const PhysicalReadRequest& request) const;
+  [[nodiscard]] VolumePerformanceStats performance_stats() const;
+  void RecordPathLookup(std::size_t component_count, std::size_t directory_enumerations) const;
 
 private:
   struct TreeBlockIndexes {
     std::uint64_t root_tree_block_index = 0;
     std::uint64_t volume_omap_block_index = 0;
+  };
+
+  struct PerformanceState {
+    std::mutex mutex;
+    std::uint64_t path_lookup_calls = 0;
+    std::uint64_t path_components_walked = 0;
+    std::uint64_t path_directory_enumerations = 0;
+    std::uint64_t inode_cache_hits = 0;
+    std::uint64_t inode_cache_misses = 0;
+  };
+
+  struct InodeCacheState {
+    std::mutex mutex;
+    std::unordered_map<std::uint64_t, InodeRecord> entries;
   };
 
   VolumeContext(const blockio::Reader& reader, VolumeRuntimeConfig runtime, VolumeInfo info,
@@ -79,6 +107,9 @@ private:
   VolumeInfo info_;
   std::uint64_t root_tree_block_index_ = 0;
   std::uint64_t volume_omap_block_index_ = 0;
+  PhysicalBlockCacheHandle block_cache_;
+  std::shared_ptr<PerformanceState> performance_;
+  std::shared_ptr<InodeCacheState> inode_cache_;
 };
 
 } // namespace orchard::apfs

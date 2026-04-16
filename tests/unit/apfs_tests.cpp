@@ -103,6 +103,113 @@ struct LoadedVolumeContext {
   orchard::apfs::VolumeContext volume;
 };
 
+class BlockAlignedRawMemoryReader final : public orchard::blockio::Reader {
+public:
+  explicit BlockAlignedRawMemoryReader(std::vector<std::uint8_t> bytes,
+                                       std::filesystem::path label = "aligned-raw-memory")
+      : bytes_(std::move(bytes)), label_(std::move(label)) {}
+
+  [[nodiscard]] orchard::blockio::Result<std::uint64_t> size_bytes() const override {
+    return static_cast<std::uint64_t>(bytes_.size());
+  }
+
+  [[nodiscard]] orchard::blockio::Result<std::size_t>
+  ReadAt(const std::uint64_t offset, const std::span<std::uint8_t> buffer) const override {
+    if ((offset % kApfsBlockSize) != 0U || (buffer.size() % kApfsBlockSize) != 0U) {
+      return orchard::blockio::Error{
+          .code = orchard::blockio::ErrorCode::kReadFailed,
+          .message = "Raw-device test reader requires block-aligned reads.",
+      };
+    }
+    if (offset > bytes_.size()) {
+      return static_cast<std::size_t>(0U);
+    }
+
+    const auto start = static_cast<std::size_t>(offset);
+    const auto available = bytes_.size() - start;
+    const auto read_size = std::min(buffer.size(), available);
+    std::copy_n(bytes_.begin() + static_cast<std::ptrdiff_t>(start),
+                static_cast<std::ptrdiff_t>(read_size), buffer.begin());
+    return read_size;
+  }
+
+  [[nodiscard]] std::string_view backend_name() const noexcept override {
+    return "aligned-raw-memory";
+  }
+
+  [[nodiscard]] orchard::blockio::TargetKind target_kind() const noexcept override {
+    return orchard::blockio::TargetKind::kRawDevice;
+  }
+
+  [[nodiscard]] const std::filesystem::path& path() const noexcept override {
+    return label_;
+  }
+
+private:
+  std::vector<std::uint8_t> bytes_;
+  std::filesystem::path label_;
+};
+
+class CountingAlignedRawMemoryReader final : public orchard::blockio::Reader {
+public:
+  explicit CountingAlignedRawMemoryReader(std::vector<std::uint8_t> bytes,
+                                          std::filesystem::path label = "counting-aligned-raw")
+      : bytes_(std::move(bytes)), label_(std::move(label)) {}
+
+  [[nodiscard]] orchard::blockio::Result<std::uint64_t> size_bytes() const override {
+    return static_cast<std::uint64_t>(bytes_.size());
+  }
+
+  [[nodiscard]] orchard::blockio::Result<std::size_t>
+  ReadAt(const std::uint64_t offset, const std::span<std::uint8_t> buffer) const override {
+    if ((offset % kApfsBlockSize) != 0U || (buffer.size() % kApfsBlockSize) != 0U) {
+      return orchard::blockio::Error{
+          .code = orchard::blockio::ErrorCode::kReadFailed,
+          .message = "Raw-device test reader requires block-aligned reads.",
+      };
+    }
+    if (offset > bytes_.size()) {
+      return static_cast<std::size_t>(0U);
+    }
+
+    ++read_call_count_;
+    max_read_size_ = std::max(max_read_size_, buffer.size());
+
+    const auto start = static_cast<std::size_t>(offset);
+    const auto available = bytes_.size() - start;
+    const auto read_size = std::min(buffer.size(), available);
+    std::copy_n(bytes_.begin() + static_cast<std::ptrdiff_t>(start),
+                static_cast<std::ptrdiff_t>(read_size), buffer.begin());
+    return read_size;
+  }
+
+  [[nodiscard]] std::string_view backend_name() const noexcept override {
+    return "counting-aligned-raw";
+  }
+
+  [[nodiscard]] orchard::blockio::TargetKind target_kind() const noexcept override {
+    return orchard::blockio::TargetKind::kRawDevice;
+  }
+
+  [[nodiscard]] const std::filesystem::path& path() const noexcept override {
+    return label_;
+  }
+
+  [[nodiscard]] std::size_t read_call_count() const noexcept {
+    return read_call_count_;
+  }
+
+  [[nodiscard]] std::size_t max_read_size() const noexcept {
+    return max_read_size_;
+  }
+
+private:
+  std::vector<std::uint8_t> bytes_;
+  std::filesystem::path label_;
+  mutable std::size_t read_call_count_ = 0U;
+  mutable std::size_t max_read_size_ = 0U;
+};
+
 std::filesystem::path SampleFixturePath(const std::string_view filename) {
   return std::filesystem::path(ORCHARD_SOURCE_DIR) / "tests" / "corpus" / "samples" /
          std::string(filename);
@@ -436,10 +543,12 @@ std::vector<std::uint8_t> MakeHashedDirectoryKey(const std::uint64_t parent_id,
                                                  const std::uint32_t hash = 0x12345000U,
                                                  const bool include_terminator = true) {
   std::vector<std::uint8_t> bytes(12U + name.size() + (include_terminator ? 1U : 0U), 0U);
+  const auto encoded_length =
+      static_cast<std::uint32_t>(name.size() + (include_terminator ? 1U : 0U));
   WriteLe64(bytes, 0U,
             parent_id |
                 (static_cast<std::uint64_t>(orchard::apfs::FsRecordType::kDirRecord) << 60U));
-  WriteLe32(bytes, 8U, hash | static_cast<std::uint32_t>(name.size() & 0x000003FFU));
+  WriteLe32(bytes, 8U, hash | (encoded_length & 0x000003FFU));
   WriteAscii(bytes, 12U, name);
   if (include_terminator) {
     bytes.back() = 0U;
@@ -1026,6 +1135,25 @@ void ParseInodeRecordSupportsRealApfsLayout() {
   ORCHARD_TEST_REQUIRE(file_result.value().internal_flags == kSparseInternalFlag);
 }
 
+void ParseFileExtentRecordMasksPackedLengthFlagsFromRealApfsLayout() {
+  constexpr std::uint64_t kExtentLength = 0x000000000009B7C0ULL;
+  constexpr std::uint64_t kExtentFlags = 0x5AULL;
+  constexpr std::uint64_t kPhysicalBlock = 0x0000000000012345ULL;
+
+  std::vector<std::uint8_t> extent_value(24U, 0U);
+  WriteLe64(extent_value, 0x00U, kExtentLength | (kExtentFlags << 56U));
+  WriteLe64(extent_value, 0x08U, kPhysicalBlock);
+
+  const auto extent_result = orchard::apfs::ParseFileExtentRecord(orchard::apfs::FsTreeRecordView{
+      .key = MakeFileExtentKey(kAlphaInodeId, 0U),
+      .value = extent_value,
+  });
+  ORCHARD_TEST_REQUIRE(extent_result.ok());
+  ORCHARD_TEST_REQUIRE(extent_result.value().length == kExtentLength);
+  ORCHARD_TEST_REQUIRE(extent_result.value().physical_block == kPhysicalBlock);
+  ORCHARD_TEST_REQUIRE(extent_result.value().flags == kExtentFlags);
+}
+
 void ParseDirectoryRecordKeySupportsHashedRealLayout() {
   const auto key_result =
       orchard::apfs::ParseDirectoryRecordKey(MakeHashedDirectoryKey(kRootInodeId, "LM"));
@@ -1057,6 +1185,15 @@ void ParseDirectoryRecordKeySupportsHashedRealLayout() {
   const auto trailing_bytes_result = orchard::apfs::ParseDirectoryRecordKey(trailing_bytes_key);
   ORCHARD_TEST_REQUIRE(trailing_bytes_result.ok());
   ORCHARD_TEST_REQUIRE(trailing_bytes_result.value().name == "LM");
+}
+
+void ParseDirectoryRecordKeyPrefersHashedLayoutWhenLegacyLengthAlsoFits() {
+  constexpr std::uint32_t kHashWithZeroLowBits = 0x62C90000U;
+
+  const auto key_result = orchard::apfs::ParseDirectoryRecordKey(
+      MakeHashedDirectoryKey(kRootInodeId, "settings.local.json", kHashWithZeroLowBits));
+  ORCHARD_TEST_REQUIRE(key_result.ok());
+  ORCHARD_TEST_REQUIRE(key_result.value().name == "settings.local.json");
 }
 
 void ParsesLeafAndInternalBtreeNodes() {
@@ -1460,6 +1597,33 @@ void VolumePathLookupAndDirectoryEnumerationWork() {
                        orchard::blockio::ErrorCode::kInvalidArgument);
 }
 
+void VolumePathLookupTracksStatsAndReusesCachedBlocks() {
+  auto reader = orchard::blockio::MakeMemoryReader(MakeDirectFixture(), "path-stats-fixture");
+  auto volume = LoadVolumeContext(*reader);
+
+  const auto first_lookup_result = orchard::apfs::LookupPath(volume, "/docs/note.txt");
+  ORCHARD_TEST_REQUIRE(first_lookup_result.ok());
+  const auto first_stats = volume.performance_stats();
+  ORCHARD_TEST_REQUIRE(first_stats.path_lookup_calls == 1U);
+  ORCHARD_TEST_REQUIRE(first_stats.path_components_walked == 2U);
+  ORCHARD_TEST_REQUIRE(first_stats.path_directory_enumerations == 2U);
+  ORCHARD_TEST_REQUIRE(first_stats.block_cache.device_reads > 0U);
+  ORCHARD_TEST_REQUIRE(first_stats.block_cache.metadata.requested_bytes > 0U);
+  ORCHARD_TEST_REQUIRE(first_stats.block_cache.file_data.requested_bytes == 0U);
+  ORCHARD_TEST_REQUIRE(first_stats.inode_cache_misses > 0U);
+
+  const auto second_lookup_result = orchard::apfs::LookupPath(volume, "/docs/note.txt");
+  ORCHARD_TEST_REQUIRE(second_lookup_result.ok());
+  const auto second_stats = volume.performance_stats();
+  ORCHARD_TEST_REQUIRE(second_stats.path_lookup_calls == 2U);
+  ORCHARD_TEST_REQUIRE(second_stats.path_components_walked == 4U);
+  ORCHARD_TEST_REQUIRE(second_stats.path_directory_enumerations == 4U);
+  ORCHARD_TEST_REQUIRE(second_stats.block_cache.cache_hits > first_stats.block_cache.cache_hits);
+  ORCHARD_TEST_REQUIRE(second_stats.block_cache.device_reads ==
+                       first_stats.block_cache.device_reads);
+  ORCHARD_TEST_REQUIRE(second_stats.inode_cache_hits > first_stats.inode_cache_hits);
+}
+
 void FileReadPathHandlesPlainSparseCompressedAndEmptyFiles() {
   auto reader = orchard::blockio::MakeMemoryReader(MakeDirectFixture(), "file-fixture");
   auto volume = LoadVolumeContext(*reader);
@@ -1516,6 +1680,74 @@ void FileReadPathHandlesPlainSparseCompressedAndEmptyFiles() {
       orchard::apfs::ReadWholeFile(volume, empty_lookup.value().inode.key.header.object_id);
   ORCHARD_TEST_REQUIRE(empty_bytes.ok());
   ORCHARD_TEST_REQUIRE(empty_bytes.value().empty());
+}
+
+void FileReadPathUsesAlignedPhysicalReadsForTailBytesOnRawDevices() {
+  BlockAlignedRawMemoryReader reader(MakeDirectFixture());
+  auto volume = LoadVolumeContext(reader);
+
+  const auto alpha_lookup = orchard::apfs::LookupPath(volume, "/alpha.txt");
+  ORCHARD_TEST_REQUIRE(alpha_lookup.ok());
+
+  const auto alpha_bytes =
+      orchard::apfs::ReadWholeFile(volume, alpha_lookup.value().inode.key.header.object_id);
+  ORCHARD_TEST_REQUIRE(alpha_bytes.ok());
+  ORCHARD_TEST_REQUIRE(std::string(alpha_bytes.value().begin(), alpha_bytes.value().end()) ==
+                       std::string(kAlphaExtent1) + std::string(kAlphaExtent2));
+
+  const auto tail_bytes = orchard::apfs::ReadFileRange(
+      volume, orchard::apfs::FileReadRequest{
+                  .inode_id = alpha_lookup.value().inode.key.header.object_id,
+                  .offset = 7U,
+                  .size = 6U,
+              });
+  ORCHARD_TEST_REQUIRE(tail_bytes.ok());
+  ORCHARD_TEST_REQUIRE(std::string(tail_bytes.value().begin(), tail_bytes.value().end()) ==
+                       "rchard");
+}
+
+void VolumeContextCoalescesContiguousPhysicalBlockMissesIntoOneDeviceRead() {
+  CountingAlignedRawMemoryReader reader(MakeDirectFixture());
+  auto volume = LoadVolumeContext(reader);
+  const auto baseline_read_call_count = reader.read_call_count();
+  const auto baseline_max_read_size = reader.max_read_size();
+
+  const auto first_read = volume.ReadPhysicalBytes(orchard::apfs::PhysicalReadRequest{
+      .physical_block_index = kAlphaDataBlock1,
+      .block_offset = 0U,
+      .size = static_cast<std::size_t>(kApfsBlockSize * 2U),
+  });
+  ORCHARD_TEST_REQUIRE(first_read.ok());
+  ORCHARD_TEST_REQUIRE(first_read.value().size() == static_cast<std::size_t>(kApfsBlockSize * 2U));
+  ORCHARD_TEST_REQUIRE(reader.read_call_count() == baseline_read_call_count + 1U);
+  ORCHARD_TEST_REQUIRE(reader.max_read_size() >= baseline_max_read_size);
+  ORCHARD_TEST_REQUIRE(reader.max_read_size() >= static_cast<std::size_t>(kApfsBlockSize * 2U));
+
+  const auto first_stats = volume.performance_stats();
+  ORCHARD_TEST_REQUIRE(first_stats.block_cache.device_reads == 1U);
+  ORCHARD_TEST_REQUIRE(first_stats.block_cache.metadata.requested_bytes == 0U);
+  ORCHARD_TEST_REQUIRE(first_stats.block_cache.file_data.requested_bytes ==
+                       static_cast<std::uint64_t>(kApfsBlockSize * 2U));
+  ORCHARD_TEST_REQUIRE(first_stats.block_cache.file_data.fetched_bytes ==
+                       static_cast<std::uint64_t>(kApfsBlockSize * 2U));
+
+  const auto second_read = volume.ReadPhysicalBytes(orchard::apfs::PhysicalReadRequest{
+      .physical_block_index = kAlphaDataBlock1,
+      .block_offset = 0U,
+      .size = static_cast<std::size_t>(kApfsBlockSize * 2U),
+  });
+  ORCHARD_TEST_REQUIRE(second_read.ok());
+  ORCHARD_TEST_REQUIRE(second_read.value() == first_read.value());
+  ORCHARD_TEST_REQUIRE(reader.read_call_count() == baseline_read_call_count + 1U);
+
+  const auto second_stats = volume.performance_stats();
+  ORCHARD_TEST_REQUIRE(second_stats.block_cache.device_reads == 1U);
+  ORCHARD_TEST_REQUIRE(second_stats.block_cache.cache_hits >=
+                       first_stats.block_cache.cache_hits + 2U);
+  ORCHARD_TEST_REQUIRE(second_stats.block_cache.file_data.requested_bytes ==
+                       static_cast<std::uint64_t>(kApfsBlockSize * 4U));
+  ORCHARD_TEST_REQUIRE(second_stats.block_cache.file_data.fetched_bytes ==
+                       static_cast<std::uint64_t>(kApfsBlockSize * 2U));
 }
 
 void DirectoryMetadataIgnoresCompressionXattrParsing() {
@@ -1678,7 +1910,7 @@ void WinFspDirectoryQueryFiltersDeterministically() {
   ORCHARD_TEST_REQUIRE(entries_result.ok());
 
   const auto query_entries_result = orchard::fs_winfsp::BuildDirectoryQueryEntries(
-      mounted_volume_result.value()->volume_context(), root_result.value(), entries_result.value());
+      *mounted_volume_result.value(), root_result.value(), entries_result.value());
   ORCHARD_TEST_REQUIRE(query_entries_result.ok());
   ORCHARD_TEST_REQUIRE(query_entries_result.value().size() == 4U);
   ORCHARD_TEST_REQUIRE(query_entries_result.value()[0].file_name == L"alpha.txt");
@@ -1732,12 +1964,50 @@ void WinFspDirectoryQuerySurvivesUnreadableChildMetadata() {
   ORCHARD_TEST_REQUIRE(entries_result.ok());
 
   const auto query_entries_result = orchard::fs_winfsp::BuildDirectoryQueryEntries(
-      mounted_volume_result.value()->volume_context(), root_result.value(), entries_result.value());
+      *mounted_volume_result.value(), root_result.value(), entries_result.value());
   ORCHARD_TEST_REQUIRE(query_entries_result.ok());
   ORCHARD_TEST_REQUIRE(query_entries_result.value().size() == 4U);
   ORCHARD_TEST_REQUIRE(query_entries_result.value()[1].file_name == L"compressed.txt");
   ORCHARD_TEST_REQUIRE(
       (query_entries_result.value()[1].file_info.file_attributes & FILE_ATTRIBUTE_DIRECTORY) == 0U);
+
+  std::filesystem::remove(temp_path);
+}
+
+void WinFspDirectoryQueryUsesEmbeddedInodeMetadataWhenAvailable() {
+  const auto temp_path =
+      std::filesystem::temp_directory_path() / "orchard_apfs_query_dir_embedded_inode.img";
+  const auto bytes = MakeDirectFixture();
+
+  {
+    std::ofstream output(temp_path, std::ios::binary);
+    output.write(reinterpret_cast<const char*>(bytes.data()),
+                 static_cast<std::streamsize>(bytes.size()));
+  }
+
+  orchard::fs_winfsp::MountConfig config;
+  config.target_path = temp_path;
+  config.mount_point = L"T:";
+
+  const auto mounted_volume_result = orchard::fs_winfsp::OpenMountedVolume(config);
+  ORCHARD_TEST_REQUIRE(mounted_volume_result.ok());
+
+  const auto root_result = mounted_volume_result.value()->ResolveFileNode("/");
+  ORCHARD_TEST_REQUIRE(root_result.ok());
+  const auto entries_result =
+      mounted_volume_result.value()->ListDirectoryEntries(root_result.value().inode_id);
+  ORCHARD_TEST_REQUIRE(entries_result.ok());
+  ORCHARD_TEST_REQUIRE(!entries_result.value().empty());
+  ORCHARD_TEST_REQUIRE(entries_result.value()[0].inode.has_value());
+
+  auto mutated_entries = entries_result.value();
+  mutated_entries[0].file_id = 0xFFFFFFFFULL;
+
+  const auto query_entries_result = orchard::fs_winfsp::BuildDirectoryQueryEntries(
+      *mounted_volume_result.value(), root_result.value(), mutated_entries);
+  ORCHARD_TEST_REQUIRE(query_entries_result.ok());
+  ORCHARD_TEST_REQUIRE(query_entries_result.value()[0].file_name == L"alpha.txt");
+  ORCHARD_TEST_REQUIRE(query_entries_result.value()[0].file_info.file_size == 14U);
 
   std::filesystem::remove(temp_path);
 }
@@ -1768,7 +2038,247 @@ void WinFspMountedVolumeReusesOpenNodeIdentity() {
   mounted_volume_result.value()->ReleaseOpenNode(first_open_result.value().get());
   mounted_volume_result.value()->ReleaseOpenNode(second_open_result.value().get());
 
+  const auto third_open_result = mounted_volume_result.value()->AcquireOpenNode("/alpha.txt");
+  ORCHARD_TEST_REQUIRE(third_open_result.ok());
+  ORCHARD_TEST_REQUIRE(first_open_result.value().get() == third_open_result.value().get());
+  mounted_volume_result.value()->ReleaseOpenNode(third_open_result.value().get());
+
   std::filesystem::remove(temp_path);
+}
+
+void WinFspMountedVolumePrimesEnumeratedChildNodes() {
+  const auto temp_path =
+      std::filesystem::temp_directory_path() / "orchard_apfs_query_prime_children.img";
+  const auto bytes = MakeDirectFixture();
+
+  {
+    std::ofstream output(temp_path, std::ios::binary);
+    output.write(reinterpret_cast<const char*>(bytes.data()),
+                 static_cast<std::streamsize>(bytes.size()));
+  }
+
+  orchard::fs_winfsp::MountConfig config;
+  config.target_path = temp_path;
+  config.mount_point = L"U:";
+
+  const auto mounted_volume_result = orchard::fs_winfsp::OpenMountedVolume(config);
+  ORCHARD_TEST_REQUIRE(mounted_volume_result.ok());
+
+  const auto root_result = mounted_volume_result.value()->ResolveFileNode("/");
+  ORCHARD_TEST_REQUIRE(root_result.ok());
+  const auto entries_result =
+      mounted_volume_result.value()->ListDirectoryEntries(root_result.value().inode_id);
+  ORCHARD_TEST_REQUIRE(entries_result.ok());
+
+  mounted_volume_result.value()->PrimeDirectoryChildren(root_result.value(),
+                                                        entries_result.value());
+
+  const auto alpha_result = mounted_volume_result.value()->AcquireOpenNode("/alpha.txt");
+  ORCHARD_TEST_REQUIRE(alpha_result.ok());
+  ORCHARD_TEST_REQUIRE(alpha_result.value()->inode_id == kAlphaInodeId);
+  ORCHARD_TEST_REQUIRE(!alpha_result.value()->metadata_complete);
+  ORCHARD_TEST_REQUIRE(alpha_result.value()->metadata.logical_size == 14U);
+  const auto mounted_stats = mounted_volume_result.value()->performance_stats();
+  ORCHARD_TEST_REQUIRE(mounted_stats.resolve_file_node_calls > 0U);
+  ORCHARD_TEST_REQUIRE(mounted_stats.directory_cache_misses > 0U);
+  mounted_volume_result.value()->ReleaseOpenNode(alpha_result.value().get());
+
+  std::filesystem::remove(temp_path);
+}
+
+void WinFspMountedVolumeReusesCachedDirectoryViews() {
+  const auto temp_path =
+      std::filesystem::temp_directory_path() / "orchard_apfs_query_directory_views.img";
+  const auto bytes = MakeDirectFixture();
+
+  {
+    std::ofstream output(temp_path, std::ios::binary);
+    output.write(reinterpret_cast<const char*>(bytes.data()),
+                 static_cast<std::streamsize>(bytes.size()));
+  }
+
+  orchard::fs_winfsp::MountConfig config;
+  config.target_path = temp_path;
+  config.mount_point = L"U:";
+
+  const auto mounted_volume_result = orchard::fs_winfsp::OpenMountedVolume(config);
+  ORCHARD_TEST_REQUIRE(mounted_volume_result.ok());
+
+  const auto first_view_result =
+      mounted_volume_result.value()->GetDirectoryEntriesView(kRootInodeId);
+  ORCHARD_TEST_REQUIRE(first_view_result.ok());
+  const auto second_view_result =
+      mounted_volume_result.value()->GetDirectoryEntriesView(kRootInodeId);
+  ORCHARD_TEST_REQUIRE(second_view_result.ok());
+  ORCHARD_TEST_REQUIRE(first_view_result.value().get() == second_view_result.value().get());
+
+  const auto mounted_stats = mounted_volume_result.value()->performance_stats();
+  ORCHARD_TEST_REQUIRE(mounted_stats.directory_cache_hits > 0U);
+
+  std::filesystem::remove(temp_path);
+}
+
+void WinFspMountedVolumeCachesRepeatedFileReadRanges() {
+  orchard::fs_winfsp::MountConfig config;
+  config.target_path = SampleFixturePath("explorer-large.img");
+  config.mount_point = L"V:";
+
+  const auto mounted_volume_result = orchard::fs_winfsp::OpenMountedVolume(config);
+  ORCHARD_TEST_REQUIRE(mounted_volume_result.ok());
+
+  const auto file_result = mounted_volume_result.value()->ResolveFileNode("/copy-source.bin");
+  ORCHARD_TEST_REQUIRE(file_result.ok());
+
+  orchard::apfs::FileReadRequest first_request;
+  first_request.inode_id = file_result.value().inode_id;
+  first_request.offset = 0U;
+  first_request.size = 22U;
+  const auto first_bytes_result =
+      mounted_volume_result.value()->ReadFileRange(file_result.value(), first_request);
+  ORCHARD_TEST_REQUIRE(first_bytes_result.ok());
+  ORCHARD_TEST_REQUIRE(std::string(first_bytes_result.value().begin(),
+                                   first_bytes_result.value().end()) == "ORCHARD-COPY-BLOCK-00\n");
+
+  orchard::apfs::FileReadRequest second_request;
+  second_request.inode_id = file_result.value().inode_id;
+  second_request.offset = static_cast<std::uint64_t>(kApfsBlockSize);
+  second_request.size = 22U;
+  const auto second_bytes_result =
+      mounted_volume_result.value()->ReadFileRange(file_result.value(), second_request);
+  ORCHARD_TEST_REQUIRE(second_bytes_result.ok());
+  ORCHARD_TEST_REQUIRE(std::string(second_bytes_result.value().begin(),
+                                   second_bytes_result.value().end()) == "ORCHARD-COPY-BLOCK-01\n");
+}
+
+void WinFspMountedVolumeDoesNotReadAheadSmallSequentialReads() {
+  orchard::fs_winfsp::MountConfig config;
+  config.target_path = SampleFixturePath("plain-user-data.img");
+  config.mount_point = L"V:";
+
+  const auto mounted_volume_result = orchard::fs_winfsp::OpenMountedVolume(config);
+  ORCHARD_TEST_REQUIRE(mounted_volume_result.ok());
+
+  const auto file_result = mounted_volume_result.value()->ResolveFileNode("/alpha.txt");
+  ORCHARD_TEST_REQUIRE(file_result.ok());
+
+  orchard::apfs::FileReadRequest first_request;
+  first_request.inode_id = file_result.value().inode_id;
+  first_request.offset = 0U;
+  first_request.size = 4U;
+  const auto first_bytes_result =
+      mounted_volume_result.value()->ReadFileRange(file_result.value(), first_request);
+  ORCHARD_TEST_REQUIRE(first_bytes_result.ok());
+  ORCHARD_TEST_REQUIRE(
+      std::string(first_bytes_result.value().begin(), first_bytes_result.value().end()) == "Hell");
+
+  orchard::apfs::FileReadRequest second_request;
+  second_request.inode_id = file_result.value().inode_id;
+  second_request.offset = 4U;
+  second_request.size = 4U;
+  const auto second_bytes_result =
+      mounted_volume_result.value()->ReadFileRange(file_result.value(), second_request);
+  ORCHARD_TEST_REQUIRE(second_bytes_result.ok());
+  ORCHARD_TEST_REQUIRE(std::string(second_bytes_result.value().begin(),
+                                   second_bytes_result.value().end()) == "o Or");
+
+  orchard::apfs::FileReadRequest third_request;
+  third_request.inode_id = file_result.value().inode_id;
+  third_request.offset = 8U;
+  third_request.size = 4U;
+  const auto third_bytes_result =
+      mounted_volume_result.value()->ReadFileRange(file_result.value(), third_request);
+  ORCHARD_TEST_REQUIRE(third_bytes_result.ok());
+  ORCHARD_TEST_REQUIRE(
+      std::string(third_bytes_result.value().begin(), third_bytes_result.value().end()) == "char");
+
+  const auto mounted_stats = mounted_volume_result.value()->performance_stats();
+  ORCHARD_TEST_REQUIRE(mounted_stats.read_ahead_prefetches == 0U);
+  ORCHARD_TEST_REQUIRE(mounted_stats.read_ahead_hits == 0U);
+}
+
+void WinFspMountedVolumeCachesCompressionInfoForPrimedRegularFiles() {
+  orchard::fs_winfsp::MountConfig config;
+  config.target_path = SampleFixturePath("plain-user-data.img");
+  config.mount_point = L"V:";
+
+  const auto mounted_volume_result = orchard::fs_winfsp::OpenMountedVolume(config);
+  ORCHARD_TEST_REQUIRE(mounted_volume_result.ok());
+
+  const auto root_result = mounted_volume_result.value()->ResolveFileNode("/");
+  ORCHARD_TEST_REQUIRE(root_result.ok());
+  const auto entries_result =
+      mounted_volume_result.value()->ListDirectoryEntries(root_result.value().inode_id);
+  ORCHARD_TEST_REQUIRE(entries_result.ok());
+
+  mounted_volume_result.value()->PrimeDirectoryChildren(root_result.value(),
+                                                        entries_result.value());
+
+  const auto alpha_result = mounted_volume_result.value()->AcquireOpenNode("/alpha.txt");
+  ORCHARD_TEST_REQUIRE(alpha_result.ok());
+  ORCHARD_TEST_REQUIRE(!alpha_result.value()->metadata_complete);
+
+  orchard::apfs::FileReadRequest first_request;
+  first_request.inode_id = alpha_result.value()->inode_id;
+  first_request.offset = 0U;
+  first_request.size = 5U;
+  const auto first_bytes_result =
+      mounted_volume_result.value()->ReadFileRange(*alpha_result.value(), first_request);
+  ORCHARD_TEST_REQUIRE(first_bytes_result.ok());
+  ORCHARD_TEST_REQUIRE(
+      std::string(first_bytes_result.value().begin(), first_bytes_result.value().end()) == "Hello");
+
+  auto mounted_stats = mounted_volume_result.value()->performance_stats();
+  ORCHARD_TEST_REQUIRE(mounted_stats.compression_info_cache_hits == 0U);
+  ORCHARD_TEST_REQUIRE(mounted_stats.compression_info_cache_misses == 1U);
+
+  orchard::apfs::FileReadRequest second_request;
+  second_request.inode_id = alpha_result.value()->inode_id;
+  second_request.offset = 6U;
+  second_request.size = 7U;
+  const auto second_bytes_result =
+      mounted_volume_result.value()->ReadFileRange(*alpha_result.value(), second_request);
+  ORCHARD_TEST_REQUIRE(second_bytes_result.ok());
+  ORCHARD_TEST_REQUIRE(std::string(second_bytes_result.value().begin(),
+                                   second_bytes_result.value().end()) == "Orchard");
+
+  mounted_stats = mounted_volume_result.value()->performance_stats();
+  ORCHARD_TEST_REQUIRE(mounted_stats.compression_info_cache_hits >= 1U);
+  ORCHARD_TEST_REQUIRE(mounted_stats.compression_info_cache_misses == 1U);
+
+  mounted_volume_result.value()->ReleaseOpenNode(alpha_result.value().get());
+}
+
+void WinFspMountedVolumeTracksReadTelemetryBuckets() {
+  orchard::fs_winfsp::MountConfig config;
+  config.target_path = SampleFixturePath("plain-user-data.img");
+  config.mount_point = L"V:";
+
+  const auto mounted_volume_result = orchard::fs_winfsp::OpenMountedVolume(config);
+  ORCHARD_TEST_REQUIRE(mounted_volume_result.ok());
+  mounted_volume_result.value()->RecordObservedRead(8U * 1024U * 1024U, 4U * 1024U, false);
+  mounted_volume_result.value()->RecordObservedRead(8U * 1024U * 1024U, 4U * 1024U, true);
+  mounted_volume_result.value()->RecordObservedRead(8U * 1024U * 1024U, 32U * 1024U, true);
+  mounted_volume_result.value()->RecordObservedRead(8U * 1024U * 1024U, 128U * 1024U, false);
+
+  mounted_volume_result.value()->RecordCompletedOpenReadCount(0U);
+  mounted_volume_result.value()->RecordCompletedOpenReadCount(1U);
+  mounted_volume_result.value()->RecordCompletedOpenReadCount(3U);
+  mounted_volume_result.value()->RecordCompletedOpenReadCount(5U);
+
+  const auto mounted_stats = mounted_volume_result.value()->performance_stats();
+  ORCHARD_TEST_REQUIRE(mounted_stats.read_requested_bytes ==
+                       static_cast<std::uint64_t>((4U + 4U + 32U + 128U) * 1024U));
+  ORCHARD_TEST_REQUIRE(mounted_stats.read_requests_small == 2U);
+  ORCHARD_TEST_REQUIRE(mounted_stats.read_requests_medium == 1U);
+  ORCHARD_TEST_REQUIRE(mounted_stats.read_requests_large == 1U);
+  ORCHARD_TEST_REQUIRE(mounted_stats.read_requests_sequential == 2U);
+  ORCHARD_TEST_REQUIRE(mounted_stats.read_requests_non_sequential == 2U);
+  ORCHARD_TEST_REQUIRE(mounted_stats.large_file_small_request_reads == 3U);
+  ORCHARD_TEST_REQUIRE(mounted_stats.large_file_small_request_sequential_reads == 2U);
+  ORCHARD_TEST_REQUIRE(mounted_stats.open_handles_zero_reads == 1U);
+  ORCHARD_TEST_REQUIRE(mounted_stats.open_handles_one_read == 1U);
+  ORCHARD_TEST_REQUIRE(mounted_stats.open_handles_two_to_four_reads == 1U);
+  ORCHARD_TEST_REQUIRE(mounted_stats.open_handles_five_plus_reads == 1U);
 }
 
 void LargeFixtureSupportsLargeDirectoryPathLookupAndFileRead() {
@@ -1909,6 +2419,42 @@ void WinFspSymlinkReparseTranslationSupportsRelativeAndAbsoluteTargets() {
                        orchard::blockio::ErrorCode::kUnsupportedTarget);
 }
 
+void WinFspSymlinkReparseDataIncludesNullTerminatedSubstituteAndPrintNames() {
+  struct SymbolicLinkReparseBufferView {
+    std::uint32_t reparse_tag = 0;
+    std::uint16_t reparse_data_length = 0;
+    std::uint16_t reserved = 0;
+    std::uint16_t substitute_name_offset = 0;
+    std::uint16_t substitute_name_length = 0;
+    std::uint16_t print_name_offset = 0;
+    std::uint16_t print_name_length = 0;
+    std::uint32_t flags = 0;
+    wchar_t path_buffer[1];
+  };
+
+  const auto reparse_result =
+      orchard::fs_winfsp::BuildSymlinkReparseData(orchard::fs_winfsp::SymlinkReparseRequest{
+          .mount_point = L"R:",
+          .target = "docs/note.txt",
+      });
+  ORCHARD_TEST_REQUIRE(reparse_result.ok());
+
+  const auto* buffer =
+      reinterpret_cast<const SymbolicLinkReparseBufferView*>(reparse_result.value().data());
+  ORCHARD_TEST_REQUIRE(buffer->reparse_tag == IO_REPARSE_TAG_SYMLINK);
+  ORCHARD_TEST_REQUIRE(buffer->flags == 0x1U);
+  ORCHARD_TEST_REQUIRE(buffer->substitute_name_offset == 0U);
+  ORCHARD_TEST_REQUIRE(buffer->substitute_name_length ==
+                       std::wstring_view(L"docs\\note.txt").size() * sizeof(wchar_t));
+  ORCHARD_TEST_REQUIRE(buffer->print_name_offset ==
+                       buffer->substitute_name_length + sizeof(wchar_t));
+  ORCHARD_TEST_REQUIRE(buffer->print_name_length ==
+                       std::wstring_view(L"docs\\note.txt").size() * sizeof(wchar_t));
+  ORCHARD_TEST_REQUIRE(reparse_result.value().size() >= sizeof(SymbolicLinkReparseBufferView) +
+                                                            buffer->substitute_name_length +
+                                                            buffer->print_name_length);
+}
+
 void WinFspMountedVolumePreservesHardLinkIdentityAndSymlinkTargets() {
   orchard::fs_winfsp::MountConfig config;
   config.target_path = SampleFixturePath("link-behavior.img");
@@ -1938,10 +2484,89 @@ void WinFspMountedVolumePreservesHardLinkIdentityAndSymlinkTargets() {
   const auto relative_link_target =
       relative_link_result.value().symlink_target.value_or(std::string{});
   ORCHARD_TEST_REQUIRE(relative_link_target == "docs/note.txt");
+  ORCHARD_TEST_REQUIRE(!relative_link_result.value().symlink_reparse_eligible);
+  ORCHARD_TEST_REQUIRE(relative_link_result.value().metadata.kind ==
+                       orchard::apfs::InodeKind::kRegularFile);
   const auto relative_link_info = orchard::fs_winfsp::BuildBasicFileInfo(
       relative_link_result.value(), mounted_volume_result.value()->volume_context().block_size());
-  ORCHARD_TEST_REQUIRE((relative_link_info.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0U);
-  ORCHARD_TEST_REQUIRE(relative_link_info.reparse_tag == IO_REPARSE_TAG_SYMLINK);
+  ORCHARD_TEST_REQUIRE((relative_link_info.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0U);
+  ORCHARD_TEST_REQUIRE(relative_link_info.reparse_tag == 0U);
+}
+
+void WinFspBrokenSymlinkFallsBackToOpaqueFileRead() {
+  orchard::fs_winfsp::MountConfig config;
+  config.target_path = SampleFixturePath("link-behavior.img");
+  config.mount_point = L"W:";
+
+  const auto mounted_volume_result = orchard::fs_winfsp::OpenMountedVolume(config);
+  ORCHARD_TEST_REQUIRE(mounted_volume_result.ok());
+
+  const auto broken_link_result =
+      mounted_volume_result.value()->ResolveFileNode("/broken-link.txt");
+  ORCHARD_TEST_REQUIRE(broken_link_result.ok());
+  ORCHARD_TEST_REQUIRE(broken_link_result.value().metadata.kind ==
+                       orchard::apfs::InodeKind::kRegularFile);
+  ORCHARD_TEST_REQUIRE(broken_link_result.value().symlink_target.has_value());
+  ORCHARD_TEST_REQUIRE(!broken_link_result.value().symlink_reparse_eligible);
+
+  const auto broken_link_info = orchard::fs_winfsp::BuildBasicFileInfo(
+      broken_link_result.value(), mounted_volume_result.value()->volume_context().block_size());
+  ORCHARD_TEST_REQUIRE((broken_link_info.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0U);
+  ORCHARD_TEST_REQUIRE(broken_link_info.reparse_tag == 0U);
+
+  orchard::apfs::FileReadRequest request;
+  request.inode_id = broken_link_result.value().inode_id;
+  request.offset = 0U;
+  request.size = static_cast<std::size_t>(broken_link_result.value().metadata.logical_size);
+  const auto bytes_result =
+      mounted_volume_result.value()->ReadFileRange(broken_link_result.value(), request);
+  ORCHARD_TEST_REQUIRE(bytes_result.ok());
+  ORCHARD_TEST_REQUIRE(std::string(bytes_result.value().begin(), bytes_result.value().end()) ==
+                       broken_link_result.value().symlink_target.value_or(std::string{}));
+}
+
+void WinFspDirectoryQueryProjectsMountedSymlinkView() {
+  orchard::fs_winfsp::MountConfig config;
+  config.target_path = SampleFixturePath("link-behavior.img");
+  config.mount_point = L"W:";
+
+  const auto mounted_volume_result = orchard::fs_winfsp::OpenMountedVolume(config);
+  ORCHARD_TEST_REQUIRE(mounted_volume_result.ok());
+
+  const auto root_result = mounted_volume_result.value()->ResolveFileNode("/");
+  ORCHARD_TEST_REQUIRE(root_result.ok());
+  const auto entries_result =
+      mounted_volume_result.value()->ListDirectoryEntries(root_result.value().inode_id);
+  ORCHARD_TEST_REQUIRE(entries_result.ok());
+
+  const auto query_entries_result = orchard::fs_winfsp::BuildDirectoryQueryEntries(
+      *mounted_volume_result.value(), root_result.value(), entries_result.value());
+  ORCHARD_TEST_REQUIRE(query_entries_result.ok());
+
+  const auto relative_link_it =
+      std::find_if(query_entries_result.value().begin(), query_entries_result.value().end(),
+                   [](const orchard::fs_winfsp::DirectoryQueryEntry& entry) {
+                     return entry.file_name == L"a-relative-note-link.txt";
+                   });
+  ORCHARD_TEST_REQUIRE(relative_link_it != query_entries_result.value().end());
+  ORCHARD_TEST_REQUIRE(
+      (relative_link_it->file_info.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0U);
+  ORCHARD_TEST_REQUIRE((relative_link_it->file_info.file_attributes & FILE_ATTRIBUTE_DIRECTORY) ==
+                       0U);
+  ORCHARD_TEST_REQUIRE(relative_link_it->file_info.file_size == kNoteText.size());
+
+  const auto broken_link_it =
+      std::find_if(query_entries_result.value().begin(), query_entries_result.value().end(),
+                   [](const orchard::fs_winfsp::DirectoryQueryEntry& entry) {
+                     return entry.file_name == L"broken-link.txt";
+                   });
+  ORCHARD_TEST_REQUIRE(broken_link_it != query_entries_result.value().end());
+  ORCHARD_TEST_REQUIRE((broken_link_it->file_info.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT) ==
+                       0U);
+  ORCHARD_TEST_REQUIRE((broken_link_it->file_info.file_attributes & FILE_ATTRIBUTE_DIRECTORY) ==
+                       0U);
+  ORCHARD_TEST_REQUIRE(broken_link_it->file_info.file_size ==
+                       std::string_view("/missing/ghost.txt").size());
 }
 
 void WinFspLargeDirectoryPaginationResumesDeterministically() {
@@ -1959,7 +2584,7 @@ void WinFspLargeDirectoryPaginationResumesDeterministically() {
   ORCHARD_TEST_REQUIRE(entries_result.ok());
 
   const auto query_entries_result = orchard::fs_winfsp::BuildDirectoryQueryEntries(
-      mounted_volume_result.value()->volume_context(), bulk_result.value(), entries_result.value());
+      *mounted_volume_result.value(), bulk_result.value(), entries_result.value());
   ORCHARD_TEST_REQUIRE(query_entries_result.ok());
   ORCHARD_TEST_REQUIRE(query_entries_result.value().size() == 181U);
 
@@ -1972,17 +2597,17 @@ void WinFspLargeDirectoryPaginationResumesDeterministically() {
   std::vector<std::wstring> paged_names;
   std::optional<std::wstring> marker;
   for (std::size_t iteration = 0; iteration < 64U; ++iteration) {
-    const auto filtered_entries = orchard::fs_winfsp::FilterDirectoryQueryEntries(
-        query_entries_result.value(), orchard::fs_winfsp::DirectoryQueryRequest{
-                                          .marker = marker,
-                                          .pattern = L"*",
-                                          .case_insensitive = true,
-                                      });
-    const auto page = orchard::fs_winfsp::PaginateDirectoryQueryEntries(
-        filtered_entries, orchard::fs_winfsp::DirectoryQueryPaginationConfig{
-                              .max_bytes = 1024U,
-                              .base_entry_size = 64U,
-                          });
+    const auto page = orchard::fs_winfsp::PaginateFilteredDirectoryQueryEntries(
+        query_entries_result.value(),
+        orchard::fs_winfsp::DirectoryQueryRequest{
+            .marker = marker,
+            .pattern = L"*",
+            .case_insensitive = true,
+        },
+        orchard::fs_winfsp::DirectoryQueryPaginationConfig{
+            .max_bytes = 1024U,
+            .base_entry_size = 64U,
+        });
     ORCHARD_TEST_REQUIRE(!page.entries.empty());
     for (const auto& entry : page.entries) {
       paged_names.push_back(entry.file_name);
@@ -1997,6 +2622,56 @@ void WinFspLargeDirectoryPaginationResumesDeterministically() {
   ORCHARD_TEST_REQUIRE(paged_names == expected_names);
   std::set<std::wstring> unique_names(paged_names.begin(), paged_names.end());
   ORCHARD_TEST_REQUIRE(unique_names.size() == paged_names.size());
+}
+
+void WinFspDirectoryPaginationReturnsEmptySuccessPageWhenMarkerIsPastEnd() {
+  orchard::fs_winfsp::MountConfig config;
+  config.target_path = SampleFixturePath("explorer-large.img");
+  config.mount_point = L"V:";
+
+  const auto mounted_volume_result = orchard::fs_winfsp::OpenMountedVolume(config);
+  ORCHARD_TEST_REQUIRE(mounted_volume_result.ok());
+
+  const auto bulk_result = mounted_volume_result.value()->ResolveFileNode("/bulk items");
+  ORCHARD_TEST_REQUIRE(bulk_result.ok());
+  const auto entries_result =
+      mounted_volume_result.value()->ListDirectoryEntries(bulk_result.value().inode_id);
+  ORCHARD_TEST_REQUIRE(entries_result.ok());
+
+  const auto query_entries_result = orchard::fs_winfsp::BuildDirectoryQueryEntries(
+      *mounted_volume_result.value(), bulk_result.value(), entries_result.value());
+  ORCHARD_TEST_REQUIRE(query_entries_result.ok());
+  ORCHARD_TEST_REQUIRE(!query_entries_result.value().empty());
+
+  const auto past_end_page = orchard::fs_winfsp::PaginateFilteredDirectoryQueryEntries(
+      query_entries_result.value(),
+      orchard::fs_winfsp::DirectoryQueryRequest{
+          .marker = query_entries_result.value().back().file_name,
+          .pattern = L"*",
+          .case_insensitive = true,
+      },
+      orchard::fs_winfsp::DirectoryQueryPaginationConfig{
+          .max_bytes = 1024U,
+          .base_entry_size = 64U,
+      });
+  ORCHARD_TEST_REQUIRE(past_end_page.entries.empty());
+  ORCHARD_TEST_REQUIRE(!past_end_page.truncated);
+  ORCHARD_TEST_REQUIRE(!past_end_page.last_emitted_name.has_value());
+
+  const auto no_match_page = orchard::fs_winfsp::PaginateFilteredDirectoryQueryEntries(
+      query_entries_result.value(),
+      orchard::fs_winfsp::DirectoryQueryRequest{
+          .marker = std::nullopt,
+          .pattern = L"*.does-not-exist",
+          .case_insensitive = true,
+      },
+      orchard::fs_winfsp::DirectoryQueryPaginationConfig{
+          .max_bytes = 1024U,
+          .base_entry_size = 64U,
+      });
+  ORCHARD_TEST_REQUIRE(no_match_page.entries.empty());
+  ORCHARD_TEST_REQUIRE(!no_match_page.truncated);
+  ORCHARD_TEST_REQUIRE(!no_match_page.last_emitted_name.has_value());
 }
 
 void WinFspMountedVolumeOpensSyntheticFixture() {
@@ -2067,8 +2742,12 @@ int main() {
       {"DetectsNxsbMagicAtObjectOffset", &DetectsNxsbMagicAtObjectOffset},
       {"ParsesObjectHeaderAndRejectsShortBlock", &ParsesObjectHeaderAndRejectsShortBlock},
       {"ParseInodeRecordSupportsRealApfsLayout", &ParseInodeRecordSupportsRealApfsLayout},
+      {"ParseFileExtentRecordMasksPackedLengthFlagsFromRealApfsLayout",
+       &ParseFileExtentRecordMasksPackedLengthFlagsFromRealApfsLayout},
       {"ParseDirectoryRecordKeySupportsHashedRealLayout",
        &ParseDirectoryRecordKeySupportsHashedRealLayout},
+      {"ParseDirectoryRecordKeyPrefersHashedLayoutWhenLegacyLengthAlsoFits",
+       &ParseDirectoryRecordKeyPrefersHashedLayoutWhenLegacyLengthAlsoFits},
       {"ParsesLeafAndInternalBtreeNodes", &ParsesLeafAndInternalBtreeNodes},
       {"BtreeWalkerResolvesChildIdentifiersThroughCallback",
        &BtreeWalkerResolvesChildIdentifiersThroughCallback},
@@ -2086,8 +2765,14 @@ int main() {
       {"DiscoversDirectContainerAndCheckpoint", &DiscoversDirectContainerAndCheckpoint},
       {"DiscoversGptWrappedContainer", &DiscoversGptWrappedContainer},
       {"VolumePathLookupAndDirectoryEnumerationWork", &VolumePathLookupAndDirectoryEnumerationWork},
+      {"VolumePathLookupTracksStatsAndReusesCachedBlocks",
+       &VolumePathLookupTracksStatsAndReusesCachedBlocks},
       {"FileReadPathHandlesPlainSparseCompressedAndEmptyFiles",
        &FileReadPathHandlesPlainSparseCompressedAndEmptyFiles},
+      {"FileReadPathUsesAlignedPhysicalReadsForTailBytesOnRawDevices",
+       &FileReadPathUsesAlignedPhysicalReadsForTailBytesOnRawDevices},
+      {"VolumeContextCoalescesContiguousPhysicalBlockMissesIntoOneDeviceRead",
+       &VolumeContextCoalescesContiguousPhysicalBlockMissesIntoOneDeviceRead},
       {"DirectoryMetadataIgnoresCompressionXattrParsing",
        &DirectoryMetadataIgnoresCompressionXattrParsing},
       {"PolicyEngineClassifiesSyntheticVolumes", &PolicyEngineClassifiesSyntheticVolumes},
@@ -2101,7 +2786,21 @@ int main() {
        &WinFspDirectoryQueryFiltersDeterministically},
       {"WinFspDirectoryQuerySurvivesUnreadableChildMetadata",
        &WinFspDirectoryQuerySurvivesUnreadableChildMetadata},
+      {"WinFspDirectoryQueryUsesEmbeddedInodeMetadataWhenAvailable",
+       &WinFspDirectoryQueryUsesEmbeddedInodeMetadataWhenAvailable},
       {"WinFspMountedVolumeReusesOpenNodeIdentity", &WinFspMountedVolumeReusesOpenNodeIdentity},
+      {"WinFspMountedVolumePrimesEnumeratedChildNodes",
+       &WinFspMountedVolumePrimesEnumeratedChildNodes},
+      {"WinFspMountedVolumeReusesCachedDirectoryViews",
+       &WinFspMountedVolumeReusesCachedDirectoryViews},
+      {"WinFspMountedVolumeCachesRepeatedFileReadRanges",
+       &WinFspMountedVolumeCachesRepeatedFileReadRanges},
+      {"WinFspMountedVolumeDoesNotReadAheadSmallSequentialReads",
+       &WinFspMountedVolumeDoesNotReadAheadSmallSequentialReads},
+      {"WinFspMountedVolumeCachesCompressionInfoForPrimedRegularFiles",
+       &WinFspMountedVolumeCachesCompressionInfoForPrimedRegularFiles},
+      {"WinFspMountedVolumeTracksReadTelemetryBuckets",
+       &WinFspMountedVolumeTracksReadTelemetryBuckets},
       {"LargeFixtureSupportsLargeDirectoryPathLookupAndFileRead",
        &LargeFixtureSupportsLargeDirectoryPathLookupAndFileRead},
       {"LinkFixtureSupportsSymlinkTargetsAndHardLinks",
@@ -2109,10 +2808,18 @@ int main() {
       {"InspectTargetReportsLinkMetadata", &InspectTargetReportsLinkMetadata},
       {"WinFspSymlinkReparseTranslationSupportsRelativeAndAbsoluteTargets",
        &WinFspSymlinkReparseTranslationSupportsRelativeAndAbsoluteTargets},
+      {"WinFspSymlinkReparseDataIncludesNullTerminatedSubstituteAndPrintNames",
+       &WinFspSymlinkReparseDataIncludesNullTerminatedSubstituteAndPrintNames},
       {"WinFspMountedVolumePreservesHardLinkIdentityAndSymlinkTargets",
        &WinFspMountedVolumePreservesHardLinkIdentityAndSymlinkTargets},
+      {"WinFspBrokenSymlinkFallsBackToOpaqueFileRead",
+       &WinFspBrokenSymlinkFallsBackToOpaqueFileRead},
+      {"WinFspDirectoryQueryProjectsMountedSymlinkView",
+       &WinFspDirectoryQueryProjectsMountedSymlinkView},
       {"WinFspLargeDirectoryPaginationResumesDeterministically",
        &WinFspLargeDirectoryPaginationResumesDeterministically},
+      {"WinFspDirectoryPaginationReturnsEmptySuccessPageWhenMarkerIsPastEnd",
+       &WinFspDirectoryPaginationReturnsEmptySuccessPageWhenMarkerIsPastEnd},
       {"WinFspMountedVolumeOpensSyntheticFixture", &WinFspMountedVolumeOpensSyntheticFixture},
       {"WinFspMountedVolumeRejectsReadWritePolicyWhenDowngradeDisabled",
        &WinFspMountedVolumeRejectsReadWritePolicyWhenDowngradeDisabled},

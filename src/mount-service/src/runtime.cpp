@@ -78,6 +78,11 @@ bool ServiceRuntime::IsRunning() const noexcept {
   return state_machine_.snapshot().state == ServiceState::kRunning;
 }
 
+bool ServiceRuntime::HasStarted() const noexcept {
+  std::scoped_lock lock(state_mutex_);
+  return state_machine_.snapshot().state != ServiceState::kCreated;
+}
+
 bool ServiceRuntime::PostCommand(std::function<void()> command) {
   {
     std::scoped_lock lock(queue_mutex_);
@@ -153,6 +158,7 @@ blockio::Result<std::monostate> ServiceRuntime::Start() {
             [this](const MountRequest& request) { return registry_.MountVolume(request); },
         .unmount_volume =
             [this](const UnmountRequest& request) { return registry_.UnmountVolume(request); },
+        .list_mounts = [this]() { return registry_.ListMounts(); },
     });
 
     auto discovery_start_result = device_discovery_manager_->Start();
@@ -292,9 +298,9 @@ blockio::Result<std::monostate> ServiceRuntime::UnmountVolume(const UnmountReque
 }
 
 blockio::Result<std::vector<MountedSessionRecord>> ServiceRuntime::ListMounts() {
-  if (!IsRunning()) {
+  if (!HasStarted()) {
     return MakeMountServiceError(blockio::ErrorCode::kAccessDenied,
-                                 "List-mounts requests require a running Orchard service runtime.");
+                                 "List-mounts requests require a started Orchard service runtime.");
   }
 
   auto promise = std::make_shared<std::promise<AsyncResult<std::vector<MountedSessionRecord>>>>();
@@ -313,10 +319,10 @@ blockio::Result<std::vector<MountedSessionRecord>> ServiceRuntime::ListMounts() 
 }
 
 blockio::Result<std::vector<KnownDeviceRecord>> ServiceRuntime::ListDevices() {
-  if (!IsRunning()) {
+  if (!HasStarted()) {
     return MakeMountServiceError(
         blockio::ErrorCode::kAccessDenied,
-        "List-devices requests require a running Orchard service runtime.");
+        "List-devices requests require a started Orchard service runtime.");
   }
 
   auto promise = std::make_shared<std::promise<AsyncResult<std::vector<KnownDeviceRecord>>>>();

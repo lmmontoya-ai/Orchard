@@ -29,6 +29,13 @@ public:
   [[nodiscard]] std::string_view volume_name() const noexcept override {
     return volume_name_;
   }
+  [[nodiscard]] MountedSessionPerformanceRecord performance() const noexcept override {
+    return MountedSessionPerformanceRecord{
+        .apfs = session_->mounted_volume().volume_context().performance_stats(),
+        .mounted_volume = session_->mounted_volume().performance_stats(),
+        .callbacks = session_->performance_stats(),
+    };
+  }
 
   void Stop() noexcept override {
     if (session_) {
@@ -90,6 +97,14 @@ std::wstring MountRegistry::AllocateMountId() {
   return L"mount-" + std::to_wstring(next_mount_ordinal_++);
 }
 
+MountedSessionRecord MountRegistry::SnapshotActiveMount(const ActiveMount& active_mount) {
+  auto snapshot = active_mount.record;
+  if (active_mount.session) {
+    snapshot.performance = active_mount.session->performance();
+  }
+  return snapshot;
+}
+
 blockio::Result<MountedSessionRecord> MountRegistry::MountVolume(const MountRequest& request) {
   if (request.config.target_path.empty()) {
     return MakeMountServiceError(blockio::ErrorCode::kInvalidArgument,
@@ -134,6 +149,7 @@ blockio::Result<MountedSessionRecord> MountRegistry::MountVolume(const MountRequ
       .volume_name = std::string(session_result.value()->volume_name()),
       .volume_label = std::wstring(session_result.value()->volume_label()),
       .read_only = request.config.require_read_only_mount,
+      .performance = {},
   };
 
   {
@@ -171,7 +187,7 @@ MountRegistry::GetMount(const std::wstring_view mount_id) const {
                                  "The requested Orchard mount is not active.");
   }
 
-  return found->second.record;
+  return SnapshotActiveMount(found->second);
 }
 
 std::vector<MountedSessionRecord> MountRegistry::ListMounts() const {
@@ -181,7 +197,7 @@ std::vector<MountedSessionRecord> MountRegistry::ListMounts() const {
   mounts.reserve(mounts_by_id_.size());
   for (const auto& [mount_id, active_mount] : mounts_by_id_) {
     (void)mount_id;
-    mounts.push_back(active_mount.record);
+    mounts.push_back(SnapshotActiveMount(active_mount));
   }
 
   std::sort(mounts.begin(), mounts.end(),

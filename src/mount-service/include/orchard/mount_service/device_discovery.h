@@ -36,11 +36,13 @@ public:
 using MountVolumeCallback =
     std::function<blockio::Result<MountedSessionRecord>(const MountRequest&)>;
 using UnmountVolumeCallback = std::function<blockio::Result<std::monostate>(const UnmountRequest&)>;
+using ListMountsCallback = std::function<blockio::Result<std::vector<MountedSessionRecord>>()>;
 
 struct DeviceDiscoveryCallbacks {
   RescanTaskPoster post_task;
   MountVolumeCallback mount_volume;
   UnmountVolumeCallback unmount_volume;
+  ListMountsCallback list_mounts;
 };
 
 class DeviceDiscoveryManager {

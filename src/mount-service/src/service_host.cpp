@@ -6,6 +6,8 @@
 #include <Windows.h>
 #include <winsvc.h>
 
+#include <algorithm>
+#include <cwctype>
 #include <iostream>
 #include <limits>
 #include <optional>
@@ -33,6 +35,14 @@ BOOL WINAPI ConsoleControlHandler(const DWORD control_type) {
   }
 
   return FALSE;
+}
+
+std::wstring NormalizeWideKey(std::wstring_view value) {
+  std::wstring normalized(value);
+  for (auto& ch : normalized) {
+    ch = static_cast<wchar_t>(::towupper(ch));
+  }
+  return normalized;
 }
 
 class ScopedScHandle {
@@ -226,6 +236,47 @@ WaitForServiceState(const SC_HANDLE service, const WaitForServiceStateRequest& r
 
 [[nodiscard]] blockio::Result<std::monostate>
 MaybeMountStartupVolume(ServiceRuntime& runtime, const ServiceHostOptions& options);
+
+bool MountMatchesStartupRequest(const MountedSessionRecord& mount, const MountRequest& request) {
+  if (NormalizeWideKey(mount.mount_point) != NormalizeWideKey(request.config.mount_point)) {
+    return false;
+  }
+
+  if (NormalizeWideKey(mount.target_path.wstring()) !=
+      NormalizeWideKey(request.config.target_path.wstring())) {
+    return false;
+  }
+
+  if (request.config.selector.object_id.has_value() &&
+      mount.volume_object_id != *request.config.selector.object_id) {
+    return false;
+  }
+
+  if (request.config.selector.name.has_value() &&
+      mount.volume_name != *request.config.selector.name) {
+    return false;
+  }
+
+  return true;
+}
+
+[[nodiscard]] blockio::Result<std::optional<MountedSessionRecord>>
+FindMatchingStartupMount(ServiceRuntime& runtime, const MountRequest& request) {
+  auto mounts_result = runtime.ListMounts();
+  if (!mounts_result.ok()) {
+    return mounts_result.error();
+  }
+
+  const auto match = std::find_if(mounts_result.value().begin(), mounts_result.value().end(),
+                                  [&request](const MountedSessionRecord& mount) {
+                                    return MountMatchesStartupRequest(mount, request);
+                                  });
+  if (match == mounts_result.value().end()) {
+    return std::optional<MountedSessionRecord>{};
+  }
+
+  return std::optional<MountedSessionRecord>{*match};
+}
 
 [[nodiscard]] blockio::Result<std::monostate> UninstallServiceBinary(const ServiceConfig& config) {
   ScopedScHandle service_manager(::OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT));
@@ -425,8 +476,23 @@ MaybeMountStartupVolume(ServiceRuntime& runtime, const ServiceHostOptions& optio
     return std::monostate{};
   }
 
+  auto existing_mount_result = FindMatchingStartupMount(runtime, *options.startup_mount);
+  if (!existing_mount_result.ok()) {
+    return existing_mount_result.error();
+  }
+  if (existing_mount_result.value().has_value()) {
+    return std::monostate{};
+  }
+
   auto mount_result = runtime.MountVolume(*options.startup_mount);
   if (!mount_result.ok()) {
+    existing_mount_result = FindMatchingStartupMount(runtime, *options.startup_mount);
+    if (!existing_mount_result.ok()) {
+      return existing_mount_result.error();
+    }
+    if (existing_mount_result.value().has_value()) {
+      return std::monostate{};
+    }
     return mount_result.error();
   }
 
@@ -537,6 +603,112 @@ void PrintDiscoveryDiagnostics(ServiceRuntime& runtime) {
   }
 }
 
+void PrintPerformanceDiagnostics(ServiceRuntime& runtime) {
+  const auto mounts_result = runtime.ListMounts();
+  if (!mounts_result.ok()) {
+    std::cerr << "Failed to list active mounts: " << mounts_result.error().message << "\n";
+    return;
+  }
+
+  std::wcout << L"Performance diagnostics:\n";
+  if (mounts_result.value().empty()) {
+    std::wcout << L"  mounts: none\n";
+    return;
+  }
+
+  for (const auto& mount : mounts_result.value()) {
+    std::wcout << L"  mount " << mount.mount_id << L": " << mount.mount_point << L" <- "
+               << mount.target_path.wstring() << L"\n";
+    std::cout << "    apfs.path_lookup_calls=" << mount.performance.apfs.path_lookup_calls
+              << " path_components_walked=" << mount.performance.apfs.path_components_walked
+              << " directory_enumerations=" << mount.performance.apfs.path_directory_enumerations
+              << "\n";
+    std::cout << "    apfs.inode_cache hits=" << mount.performance.apfs.inode_cache_hits
+              << " misses=" << mount.performance.apfs.inode_cache_misses << "\n";
+    std::cout << "    apfs.block_cache hits=" << mount.performance.apfs.block_cache.cache_hits
+              << " misses=" << mount.performance.apfs.block_cache.cache_misses
+              << " device_reads=" << mount.performance.apfs.block_cache.device_reads
+              << " requested_bytes=" << mount.performance.apfs.block_cache.requested_bytes
+              << " fetched_bytes=" << mount.performance.apfs.block_cache.fetched_bytes << "\n";
+    std::cout << "    apfs.block_cache.metadata hits="
+              << mount.performance.apfs.block_cache.metadata.cache_hits
+              << " misses=" << mount.performance.apfs.block_cache.metadata.cache_misses
+              << " device_reads=" << mount.performance.apfs.block_cache.metadata.device_reads
+              << " requested_bytes=" << mount.performance.apfs.block_cache.metadata.requested_bytes
+              << " fetched_bytes=" << mount.performance.apfs.block_cache.metadata.fetched_bytes
+              << "\n";
+    std::cout << "    apfs.block_cache.file_data hits="
+              << mount.performance.apfs.block_cache.file_data.cache_hits
+              << " misses=" << mount.performance.apfs.block_cache.file_data.cache_misses
+              << " device_reads=" << mount.performance.apfs.block_cache.file_data.device_reads
+              << " requested_bytes=" << mount.performance.apfs.block_cache.file_data.requested_bytes
+              << " fetched_bytes=" << mount.performance.apfs.block_cache.file_data.fetched_bytes
+              << "\n";
+    std::cout << "    mounted.resolve_file_node_calls="
+              << mount.performance.mounted_volume.resolve_file_node_calls
+              << " cache_hits=" << mount.performance.mounted_volume.resolve_file_node_cache_hits
+              << " directory_hits=" << mount.performance.mounted_volume.directory_cache_hits
+              << " directory_misses=" << mount.performance.mounted_volume.directory_cache_misses
+              << "\n";
+    std::cout << "    mounted.symlink_target_loads="
+              << mount.performance.mounted_volume.symlink_target_loads
+              << " read_extent_hits=" << mount.performance.mounted_volume.read_extent_cache_hits
+              << " read_extent_misses=" << mount.performance.mounted_volume.read_extent_cache_misses
+              << " read_ahead_hits=" << mount.performance.mounted_volume.read_ahead_hits
+              << " read_ahead_prefetches=" << mount.performance.mounted_volume.read_ahead_prefetches
+              << " compression_info_hits="
+              << mount.performance.mounted_volume.compression_info_cache_hits
+              << " compression_info_misses="
+              << mount.performance.mounted_volume.compression_info_cache_misses
+              << " compression_hits=" << mount.performance.mounted_volume.compression_cache_hits
+              << " compression_misses=" << mount.performance.mounted_volume.compression_cache_misses
+              << "\n";
+    std::cout << "    mounted.read_requests requested_bytes="
+              << mount.performance.mounted_volume.read_requested_bytes
+              << " fetched_bytes=" << mount.performance.mounted_volume.read_fetched_bytes
+              << " small=" << mount.performance.mounted_volume.read_requests_small
+              << " medium=" << mount.performance.mounted_volume.read_requests_medium
+              << " large=" << mount.performance.mounted_volume.read_requests_large
+              << " sequential=" << mount.performance.mounted_volume.read_requests_sequential
+              << " non_sequential=" << mount.performance.mounted_volume.read_requests_non_sequential
+              << " large_file_small="
+              << mount.performance.mounted_volume.large_file_small_request_reads
+              << " large_file_small_sequential="
+              << mount.performance.mounted_volume.large_file_small_request_sequential_reads << "\n";
+    std::cout << "    mounted.open_read_counts zero="
+              << mount.performance.mounted_volume.open_handles_zero_reads
+              << " one=" << mount.performance.mounted_volume.open_handles_one_read
+              << " two_to_four=" << mount.performance.mounted_volume.open_handles_two_to_four_reads
+              << " five_plus=" << mount.performance.mounted_volume.open_handles_five_plus_reads
+              << "\n";
+
+    bool printed_callback = false;
+    for (std::size_t index = 0; index < mount.performance.callbacks.callbacks.size(); ++index) {
+      const auto& callback = mount.performance.callbacks.callbacks[index];
+      if (callback.call_count == 0U) {
+        continue;
+      }
+
+      if (!printed_callback) {
+        std::cout << "    callbacks:\n";
+        printed_callback = true;
+      }
+      const auto average_microseconds =
+          callback.call_count == 0U ? 0U : callback.total_microseconds / callback.call_count;
+      std::cout << "      "
+                << orchard::fs_winfsp::ToString(
+                       static_cast<orchard::fs_winfsp::MountCallbackId>(index))
+                << ": count=" << callback.call_count << " total_us=" << callback.total_microseconds
+                << " avg_us=" << average_microseconds << " max_us=" << callback.max_microseconds
+                << " slow_50ms=" << callback.slow_over_50ms
+                << " slow_200ms=" << callback.slow_over_200ms << "\n";
+    }
+    if (!printed_callback) {
+      std::cout << "    callbacks: none\n";
+    }
+  }
+}
+
 int RunConsoleHost(const ServiceHostOptions& options) {
   ServiceRuntime runtime(options.service);
   auto start_result = runtime.Start();
@@ -562,6 +734,10 @@ int RunConsoleHost(const ServiceHostOptions& options) {
   const auto wait_result = WaitForConsoleShutdown(runtime, options);
   ::SetConsoleCtrlHandler(&ConsoleControlHandler, FALSE);
   g_console_runtime = nullptr;
+
+  if (options.diagnose_perf) {
+    PrintPerformanceDiagnostics(runtime);
+  }
 
   runtime.Stop();
 
@@ -678,6 +854,10 @@ blockio::Result<ServiceHostOptions> ParseServiceHostCommandLine(const int argc, 
     }
     if (argument == "--diagnose-discovery") {
       options.diagnose_discovery = true;
+      continue;
+    }
+    if (argument == "--diagnose-perf") {
+      options.diagnose_perf = true;
       continue;
     }
 

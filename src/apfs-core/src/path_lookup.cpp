@@ -60,8 +60,12 @@ std::string JoinNormalizedPath(const std::vector<std::string>& components) {
 } // namespace
 
 blockio::Result<ResolvedPath> LookupPath(const VolumeContext& volume, const std::string_view path) {
+  std::size_t path_components_walked = 0U;
+  std::size_t directory_enumerations = 0U;
+
   auto current_inode_result = volume.GetInode(volume.root_directory_object_id());
   if (!current_inode_result.ok()) {
+    volume.RecordPathLookup(path_components_walked, directory_enumerations);
     return current_inode_result.error();
   }
 
@@ -79,6 +83,7 @@ blockio::Result<ResolvedPath> LookupPath(const VolumeContext& volume, const std:
       const auto parent_inode_id = resolved.inode.parent_id;
       auto parent_result = volume.GetInode(parent_inode_id);
       if (!parent_result.ok()) {
+        volume.RecordPathLookup(path_components_walked, directory_enumerations);
         return parent_result.error();
       }
       resolved.inode = parent_result.value();
@@ -90,12 +95,15 @@ blockio::Result<ResolvedPath> LookupPath(const VolumeContext& volume, const std:
     }
 
     if (!IsDirectory(resolved.inode.kind)) {
+      volume.RecordPathLookup(path_components_walked, directory_enumerations);
       return MakeApfsError(blockio::ErrorCode::kInvalidArgument,
                            "Path traversal encountered a non-directory inode.");
     }
 
+    ++directory_enumerations;
     auto entries_result = volume.ListDirectoryEntries(resolved.inode.key.header.object_id);
     if (!entries_result.ok()) {
+      volume.RecordPathLookup(path_components_walked, directory_enumerations);
       return entries_result.error();
     }
 
@@ -107,19 +115,27 @@ blockio::Result<ResolvedPath> LookupPath(const VolumeContext& volume, const std:
     if (match == entries_result.value().end()) {
       std::ostringstream message;
       message << "Path component '" << component << "' was not found in the directory.";
+      volume.RecordPathLookup(path_components_walked, directory_enumerations);
       return MakeApfsError(blockio::ErrorCode::kNotFound, message.str());
     }
 
-    auto inode_result = volume.GetInode(match->file_id);
-    if (!inode_result.ok()) {
-      return inode_result.error();
-    }
+    if (match->inode.has_value()) {
+      resolved.inode = *match->inode;
+    } else {
+      auto inode_result = volume.GetInode(match->file_id);
+      if (!inode_result.ok()) {
+        volume.RecordPathLookup(path_components_walked, directory_enumerations);
+        return inode_result.error();
+      }
 
-    resolved.inode = inode_result.value();
+      resolved.inode = inode_result.value();
+    }
+    ++path_components_walked;
     normalized_components.push_back(match->key.name);
     resolved.normalized_path = JoinNormalizedPath(normalized_components);
   }
 
+  volume.RecordPathLookup(path_components_walked, directory_enumerations);
   return resolved;
 }
 

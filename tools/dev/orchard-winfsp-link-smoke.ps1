@@ -45,7 +45,7 @@ try {
     absolute_link_text = $checkResult.absolute_link_text
     hard_link_hash = $checkResult.hard_link_hash
     cross_directory_alias_text = $checkResult.cross_directory_alias_text
-    broken_link_failed = $checkResult.broken_link_failed
+    broken_link_text = $checkResult.broken_link_text
   } | ConvertTo-Json -Depth 4
 }
 finally {

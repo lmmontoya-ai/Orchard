@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -39,6 +40,7 @@ struct DirectoryEntryRecord {
   std::uint64_t file_id = 0;
   std::uint16_t flags = 0;
   InodeKind kind = InodeKind::kUnknown;
+  std::optional<InodeRecord> inode;
 };
 
 struct FileExtentRecord {

@@ -6,7 +6,9 @@
 #include <string>
 #include <string_view>
 
+#include "orchard/apfs/volume.h"
 #include "orchard/blockio/error.h"
+#include "orchard/fs_winfsp/mount.h"
 #include "orchard/fs_winfsp/types.h"
 
 namespace orchard::mount_service {
@@ -29,6 +31,12 @@ struct UnmountRequest {
   std::wstring mount_id;
 };
 
+struct MountedSessionPerformanceRecord {
+  orchard::apfs::VolumePerformanceStats apfs;
+  orchard::fs_winfsp::MountedVolumePerformanceStats mounted_volume;
+  orchard::fs_winfsp::MountSessionPerformanceStats callbacks;
+};
+
 struct MountedSessionRecord {
   std::wstring mount_id;
   std::filesystem::path target_path;
@@ -37,6 +45,7 @@ struct MountedSessionRecord {
   std::string volume_name;
   std::wstring volume_label;
   bool read_only = true;
+  MountedSessionPerformanceRecord performance;
 };
 
 blockio::Error MakeMountServiceError(blockio::ErrorCode code, std::string message,

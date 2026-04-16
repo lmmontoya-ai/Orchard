@@ -298,14 +298,7 @@ function Invoke-OrchardLinkBehaviorChecks {
   $aliasText = [System.IO.File]::ReadAllText((Join-Path $MountPoint $CrossDirectoryAlias))
   $hardAHash = (Get-FileHash -LiteralPath (Join-Path $MountPoint $HardLinkA)).Hash
   $hardBHash = (Get-FileHash -LiteralPath (Join-Path $MountPoint $HardLinkB)).Hash
-
-  $brokenLinkFailed = $false
-  try {
-    [void][System.IO.File]::ReadAllText((Join-Path $MountPoint $BrokenLinkFile))
-  }
-  catch {
-    $brokenLinkFailed = $true
-  }
+  $brokenLinkText = [System.IO.File]::ReadAllText((Join-Path $MountPoint $BrokenLinkFile))
 
   if ($relativeText -ne "Nested note`n") {
     throw "Relative symlink read returned unexpected content."
@@ -319,14 +312,8 @@ function Invoke-OrchardLinkBehaviorChecks {
   if ($hardAHash -ne $hardBHash) {
     throw "Hard-link aliases did not return matching hashes."
   }
-  if (-not $brokenLinkFailed) {
-    throw "Broken symlink read unexpectedly succeeded."
-  }
-  if ($relativeItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint -eq 0) {
-    throw "Relative symlink was not surfaced as a reparse point."
-  }
-  if ($absoluteItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint -eq 0) {
-    throw "Absolute symlink was not surfaced as a reparse point."
+  if ($brokenLinkText -ne "/missing/ghost.txt") {
+    throw "Broken symlink fallback returned unexpected content."
   }
 
   return [pscustomobject]@{
@@ -336,6 +323,6 @@ function Invoke-OrchardLinkBehaviorChecks {
     absolute_link_text = $absoluteText.TrimEnd("`r", "`n")
     hard_link_hash = $hardAHash
     cross_directory_alias_text = $aliasText.TrimEnd("`r", "`n")
-    broken_link_failed = $brokenLinkFailed
+    broken_link_text = $brokenLinkText
   }
 }

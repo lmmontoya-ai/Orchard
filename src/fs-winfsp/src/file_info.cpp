@@ -40,8 +40,10 @@ BasicFileInfo BuildBasicFileInfo(const FileNode& node, const std::uint32_t block
     info.allocation_size = node.metadata.allocated_size;
     break;
   case orchard::apfs::InodeKind::kSymlink:
-    info.file_attributes |= FILE_ATTRIBUTE_REPARSE_POINT;
-    info.reparse_tag = IO_REPARSE_TAG_SYMLINK;
+    if (node.symlink_reparse_eligible) {
+      info.file_attributes |= FILE_ATTRIBUTE_REPARSE_POINT;
+      info.reparse_tag = IO_REPARSE_TAG_SYMLINK;
+    }
     info.file_size = node.metadata.logical_size;
     info.allocation_size = node.metadata.allocated_size;
     break;

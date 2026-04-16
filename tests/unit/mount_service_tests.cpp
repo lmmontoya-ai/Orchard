@@ -173,6 +173,7 @@ private:
 struct FakeMountOps {
   std::vector<orchard::mount_service::MountRequest> mount_requests;
   std::vector<std::wstring> unmount_ids;
+  std::vector<orchard::mount_service::MountedSessionRecord> active_mounts;
   int next_mount_ordinal = 1;
   std::optional<orchard::blockio::Error> mount_error_override;
 
@@ -182,7 +183,7 @@ struct FakeMountOps {
       return *mount_error_override;
     }
     mount_requests.push_back(request);
-    return orchard::mount_service::MountedSessionRecord{
+    auto record = orchard::mount_service::MountedSessionRecord{
         .mount_id = L"auto-" + std::to_wstring(next_mount_ordinal++),
         .target_path = request.config.target_path,
         .mount_point = request.config.mount_point,
@@ -190,13 +191,27 @@ struct FakeMountOps {
         .volume_name = request.config.selector.name.value_or("AutoMountedVolume"),
         .volume_label = L"AutoMountedVolume",
         .read_only = request.config.require_read_only_mount,
+        .performance = {},
     };
+    active_mounts.push_back(record);
+    return record;
   }
 
   [[nodiscard]] orchard::blockio::Result<std::monostate>
   Unmount(const orchard::mount_service::UnmountRequest& request) {
     unmount_ids.push_back(request.mount_id);
+    active_mounts.erase(
+        std::remove_if(active_mounts.begin(), active_mounts.end(),
+                       [&request](const orchard::mount_service::MountedSessionRecord& current) {
+                         return current.mount_id == request.mount_id;
+                       }),
+        active_mounts.end());
     return std::monostate{};
+  }
+
+  [[nodiscard]] orchard::blockio::Result<std::vector<orchard::mount_service::MountedSessionRecord>>
+  ListMounts() const {
+    return active_mounts;
   }
 };
 
@@ -204,10 +219,11 @@ class FakeManagedMountSession final : public orchard::mount_service::ManagedMoun
 public:
   FakeManagedMountSession(std::wstring mount_point, std::wstring volume_label,
                           const std::uint64_t volume_object_id, std::string volume_name,
-                          std::shared_ptr<int> stop_counter)
+                          std::shared_ptr<int> stop_counter,
+                          orchard::mount_service::MountedSessionPerformanceRecord performance)
       : mount_point_(std::move(mount_point)), volume_label_(std::move(volume_label)),
         volume_object_id_(volume_object_id), volume_name_(std::move(volume_name)),
-        stop_counter_(std::move(stop_counter)) {}
+        stop_counter_(std::move(stop_counter)), performance_(std::move(performance)) {}
 
   [[nodiscard]] std::wstring_view mount_point() const noexcept override {
     return mount_point_;
@@ -221,6 +237,10 @@ public:
   [[nodiscard]] std::string_view volume_name() const noexcept override {
     return volume_name_;
   }
+  [[nodiscard]] orchard::mount_service::MountedSessionPerformanceRecord
+  performance() const noexcept override {
+    return performance_;
+  }
 
   void Stop() noexcept override {
     ++(*stop_counter_);
@@ -232,6 +252,7 @@ private:
   std::uint64_t volume_object_id_ = 0;
   std::string volume_name_;
   std::shared_ptr<int> stop_counter_;
+  orchard::mount_service::MountedSessionPerformanceRecord performance_;
 };
 
 class FakeMountSessionFactory final : public orchard::mount_service::MountSessionFactory {
@@ -244,9 +265,17 @@ public:
     state_->seen_configs.push_back(config);
     auto stop_counter = std::make_shared<int>(0);
     state_->stop_counters.push_back(stop_counter);
+    orchard::mount_service::MountedSessionPerformanceRecord performance;
+    performance.apfs.path_lookup_calls = 7U;
+    performance.apfs.path_components_walked = 21U;
+    performance.mounted_volume.directory_cache_hits = 11U;
+    performance.callbacks
+        .callbacks[static_cast<std::size_t>(orchard::fs_winfsp::MountCallbackId::kOpen)]
+        .call_count = 3U;
 
-    orchard::mount_service::ManagedMountSessionHandle session(new FakeManagedMountSession(
-        config.mount_point, L"Fake Volume", 42U, "Fake Volume", std::move(stop_counter)));
+    orchard::mount_service::ManagedMountSessionHandle session(
+        new FakeManagedMountSession(config.mount_point, L"Fake Volume", 42U, "Fake Volume",
+                                    std::move(stop_counter), std::move(performance)));
     return session;
   }
 
@@ -322,6 +351,14 @@ void MountRegistryRejectsDuplicateMountIdsAndMountPoints() {
 
   auto mounts = registry.ListMounts();
   ORCHARD_TEST_REQUIRE(mounts.size() == 1U);
+  ORCHARD_TEST_REQUIRE(mounts.front().performance.apfs.path_lookup_calls == 7U);
+  ORCHARD_TEST_REQUIRE(mounts.front().performance.apfs.path_components_walked == 21U);
+  ORCHARD_TEST_REQUIRE(mounts.front().performance.mounted_volume.directory_cache_hits == 11U);
+  ORCHARD_TEST_REQUIRE(
+      mounts.front()
+          .performance.callbacks
+          .callbacks[static_cast<std::size_t>(orchard::fs_winfsp::MountCallbackId::kOpen)]
+          .call_count == 3U);
 
   auto unmount_result =
       registry.UnmountVolume(orchard::mount_service::UnmountRequest{.mount_id = L"alpha"});
@@ -374,6 +411,7 @@ void ServiceHostCommandLineParsesConsoleMountOptions() {
       const_cast<char*>("--volume-name"),
       const_cast<char*>("Data"),
       const_cast<char*>("--diagnose-discovery"),
+      const_cast<char*>("--diagnose-perf"),
       const_cast<char*>("--hold-ms"),
       const_cast<char*>("5000"),
   };
@@ -385,6 +423,7 @@ void ServiceHostCommandLineParsesConsoleMountOptions() {
                        orchard::mount_service::ServiceLaunchMode::kConsole);
   ORCHARD_TEST_REQUIRE(parse_result.value().service.service_name == L"OrchardTestSvc");
   ORCHARD_TEST_REQUIRE(parse_result.value().diagnose_discovery);
+  ORCHARD_TEST_REQUIRE(parse_result.value().diagnose_perf);
   const auto& startup_mount_optional = parse_result.value().startup_mount;
   if (!startup_mount_optional.has_value()) {
     throw orchard_test::Failure("startup_mount was not populated.");
@@ -496,6 +535,7 @@ void DeviceDiscoveryManagerStartupEnumeratesAndMountsSupportedVolume() {
               [&mount_ops](const orchard::mount_service::UnmountRequest& request) {
                 return mount_ops.Unmount(request);
               },
+          .list_mounts = [&mount_ops]() { return mount_ops.ListMounts(); },
       });
 
   auto start_result = manager.Start();
@@ -513,6 +553,62 @@ void DeviceDiscoveryManagerStartupEnumeratesAndMountsSupportedVolume() {
   ORCHARD_TEST_REQUIRE(mounted_volume.mount_point == L"R:");
   ORCHARD_TEST_REQUIRE(mount_ops.mount_requests.size() == 1U);
   ORCHARD_TEST_REQUIRE(monitor_ptr->IsTracked(LR"(\\.\PhysicalDrive9)"));
+}
+
+void DeviceDiscoveryManagerAdoptsExistingMatchingMount() {
+  auto poster = std::make_shared<FakePosterState>();
+  auto monitor = std::make_unique<FakeDeviceMonitor>();
+  auto enumerator = std::make_unique<FakeDeviceEnumerator>(
+      std::vector<orchard::mount_service::DeviceInterfaceInfo>{
+          orchard::mount_service::DeviceInterfaceInfo{.device_path = LR"(\\.\PhysicalDrive14)"},
+      });
+  auto prober = std::make_unique<FakeDeviceProber>();
+  prober->SetResult(LR"(\\.\PhysicalDrive14)", FakeDeviceProber::ProbeEntry{
+                                                   .record = MakeMountedCandidateDevice(
+                                                       LR"(\\.\PhysicalDrive14)", 14U, "Data"),
+                                                   .error = std::nullopt,
+                                               });
+  auto allocator = std::make_unique<FakeMountPointAllocator>();
+  allocator->PushMountPoint(L"S:");
+  FakeMountOps mount_ops;
+  mount_ops.active_mounts.push_back(orchard::mount_service::MountedSessionRecord{
+      .mount_id = L"existing-1",
+      .target_path = LR"(\\.\PhysicalDrive14)",
+      .mount_point = L"R:",
+      .volume_object_id = 14U,
+      .volume_name = "Data",
+      .volume_label = L"Data",
+      .read_only = true,
+      .performance = {},
+  });
+
+  orchard::mount_service::DeviceDiscoveryManager manager(
+      std::move(monitor), std::move(enumerator), std::move(prober), std::move(allocator),
+      orchard::mount_service::DeviceDiscoveryCallbacks{
+          .post_task =
+              [poster](std::function<void()> task) { return poster->Post(std::move(task)); },
+          .mount_volume =
+              [&mount_ops](const orchard::mount_service::MountRequest& request) {
+                return mount_ops.Mount(request);
+              },
+          .unmount_volume =
+              [&mount_ops](const orchard::mount_service::UnmountRequest& request) {
+                return mount_ops.Unmount(request);
+              },
+          .list_mounts = [&mount_ops]() { return mount_ops.ListMounts(); },
+      });
+
+  auto start_result = manager.Start();
+  ORCHARD_TEST_REQUIRE(start_result.ok());
+  poster->RunAll();
+
+  const auto devices = manager.ListDevices();
+  ORCHARD_TEST_REQUIRE(devices.size() == 1U);
+  ORCHARD_TEST_REQUIRE(devices.front().volumes.size() == 1U);
+  ORCHARD_TEST_REQUIRE(devices.front().volumes.front().mount.has_value());
+  ORCHARD_TEST_REQUIRE(devices.front().volumes.front().mount->mount_id == L"existing-1");
+  ORCHARD_TEST_REQUIRE(devices.front().volumes.front().mount->mount_point == L"R:");
+  ORCHARD_TEST_REQUIRE(mount_ops.mount_requests.empty());
 }
 
 void DeviceDiscoveryManagerRemovalUnmountsMountedDevice() {
@@ -547,6 +643,7 @@ void DeviceDiscoveryManagerRemovalUnmountsMountedDevice() {
               [&mount_ops](const orchard::mount_service::UnmountRequest& request) {
                 return mount_ops.Unmount(request);
               },
+          .list_mounts = [&mount_ops]() { return mount_ops.ListMounts(); },
       });
 
   auto start_result = manager.Start();
@@ -595,6 +692,7 @@ void DeviceDiscoveryManagerBurstEventsDoNotDuplicateMounts() {
               [&mount_ops](const orchard::mount_service::UnmountRequest& request) {
                 return mount_ops.Unmount(request);
               },
+          .list_mounts = [&mount_ops]() { return mount_ops.ListMounts(); },
       });
 
   auto start_result = manager.Start();
@@ -649,6 +747,7 @@ void DeviceDiscoveryManagerQueryRemoveSuppresssImmediateRemountUntilFailureClear
               [&mount_ops](const orchard::mount_service::UnmountRequest& request) {
                 return mount_ops.Unmount(request);
               },
+          .list_mounts = [&mount_ops]() { return mount_ops.ListMounts(); },
       });
 
   auto start_result = manager.Start();
@@ -710,6 +809,7 @@ void DeviceDiscoveryManagerRecordsMountFailuresOnKnownVolume() {
               [&mount_ops](const orchard::mount_service::UnmountRequest& request) {
                 return mount_ops.Unmount(request);
               },
+          .list_mounts = [&mount_ops]() { return mount_ops.ListMounts(); },
       });
 
   auto start_result = manager.Start();
@@ -743,6 +843,8 @@ int main() {
       {"RescanCoordinatorCoalescesBurstRequests", &RescanCoordinatorCoalescesBurstRequests},
       {"DeviceDiscoveryManagerStartupEnumeratesAndMountsSupportedVolume",
        &DeviceDiscoveryManagerStartupEnumeratesAndMountsSupportedVolume},
+      {"DeviceDiscoveryManagerAdoptsExistingMatchingMount",
+       &DeviceDiscoveryManagerAdoptsExistingMatchingMount},
       {"DeviceDiscoveryManagerRemovalUnmountsMountedDevice",
        &DeviceDiscoveryManagerRemovalUnmountsMountedDevice},
       {"DeviceDiscoveryManagerBurstEventsDoNotDuplicateMounts",

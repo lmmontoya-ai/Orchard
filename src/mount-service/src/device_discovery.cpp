@@ -137,6 +137,32 @@ bool ContainsPath(const std::vector<std::wstring>& paths, const std::wstring_vie
          }) != paths.end();
 }
 
+void AdoptObservedMounts(const DeviceDiscoveryCallbacks& callbacks, DeviceInventory& inventory,
+                         const std::wstring_view device_path) {
+  if (!callbacks.list_mounts) {
+    return;
+  }
+
+  auto mounts_result = callbacks.list_mounts();
+  if (!mounts_result.ok()) {
+    return;
+  }
+
+  const auto normalized_device_path = NormalizeDevicePathKey(device_path);
+  for (const auto& mount : mounts_result.value()) {
+    if (NormalizeDevicePathKey(mount.target_path.wstring()) != normalized_device_path) {
+      continue;
+    }
+
+    inventory.AttachMount(device_path, mount.volume_object_id,
+                          MountedVolumeBinding{
+                              .mount_id = mount.mount_id,
+                              .mount_point = mount.mount_point,
+                              .read_only = mount.read_only,
+                          });
+  }
+}
+
 } // namespace
 
 DeviceDiscoveryManager::DeviceDiscoveryManager(
@@ -304,6 +330,7 @@ void DeviceDiscoveryManager::ReconcilePresentDevice(const DeviceInterfaceInfo& d
   existing_record = inventory_.FindDevice(device.device_path);
   CopyRetainedMountBindings(existing_record, &candidate_record);
   inventory_.UpsertDevice(candidate_record);
+  AdoptObservedMounts(callbacks_, inventory_, device.device_path);
 
   auto updated_record = inventory_.FindDevice(device.device_path);
   if (!updated_record.has_value()) {
