@@ -23,8 +23,9 @@ constexpr std::size_t kReadAheadMinFileBytes = 512U * 1024U;
 constexpr std::size_t kReadAheadLargeFileBytes = 4U * 1024U * 1024U;
 constexpr std::size_t kReadAheadMinRequestBytes = 64U * 1024U;
 constexpr std::size_t kReadAheadMinBytes = 256U * 1024U;
-constexpr std::size_t kReadAheadLargeFileMinBytes = 512U * 1024U;
+constexpr std::size_t kReadAheadLargeFileMinBytes = 1U * 1024U * 1024U;
 constexpr std::size_t kReadAheadMaxBytes = 1U * 1024U * 1024U;
+constexpr std::size_t kReadAheadLargeFileMaxBytes = 4U * 1024U * 1024U;
 constexpr std::size_t kReadAheadGrowthFactor = 2U;
 constexpr std::size_t kSmallReadRequestBytes = 16U * 1024U;
 
@@ -667,6 +668,7 @@ MountedVolume::ReadFileRange(const FileNode& node,
   std::size_t read_ahead_size = 0U;
   {
     std::scoped_lock lock(read_cache_mutex_);
+    auto& cache_entry = read_cache_by_inode_[node.inode_id];
     auto existing = read_cache_by_inode_.find(node.inode_id);
     if (existing != read_cache_by_inode_.end() && existing->second.extents) {
       ++read_extent_cache_hits_;
@@ -683,41 +685,41 @@ MountedVolume::ReadFileRange(const FileNode& node,
       }
     }
 
-    if (cached_read_ahead_bytes) {
-      // The cached range fully covers this request; skip sequential state updates.
+    const auto expected_offset = cache_entry.last_request_offset + cache_entry.last_request_size;
+    if (cache_entry.last_request_size != 0U && request.offset == expected_offset) {
+      ++cache_entry.sequential_read_count;
     } else {
-      auto& cache_entry = read_cache_by_inode_[node.inode_id];
-      const auto expected_offset = cache_entry.last_request_offset + cache_entry.last_request_size;
-      if (cache_entry.last_request_size != 0U && request.offset == expected_offset) {
-        ++cache_entry.sequential_read_count;
-      } else {
-        cache_entry.sequential_read_count = 1U;
+      cache_entry.sequential_read_count = 1U;
+      if (!cached_read_ahead_bytes) {
         cache_entry.read_ahead_bytes.reset();
         cache_entry.read_ahead_offset = 0U;
       }
-      cache_entry.last_request_offset = request.offset;
-      cache_entry.last_request_size = bounded_size;
+    }
+    cache_entry.last_request_offset = request.offset;
+    cache_entry.last_request_size = bounded_size;
 
-      const bool allow_small_request_read_ahead = metadata.logical_size >= kReadAheadLargeFileBytes;
-      if (cache_entry.sequential_read_count >= kReadAheadTriggerSequentialReads &&
-          metadata.logical_size >= kReadAheadMinFileBytes &&
-          (bounded_size >= kReadAheadMinRequestBytes || allow_small_request_read_ahead)) {
-        std::size_t desired_window = std::max<std::size_t>(
-            bounded_size,
-            allow_small_request_read_ahead ? kReadAheadLargeFileMinBytes : kReadAheadMinBytes);
-        if (bounded_size >= kReadAheadMinRequestBytes &&
-            bounded_size <= (kReadAheadMaxBytes / kReadAheadGrowthFactor)) {
-          desired_window =
-              std::max<std::size_t>(desired_window, bounded_size * kReadAheadGrowthFactor);
-        }
-        desired_window = std::max<std::size_t>(desired_window, bounded_size);
-        desired_window = std::min<std::size_t>(desired_window, kReadAheadMaxBytes);
-        const auto remaining_window = static_cast<std::size_t>(std::min<std::uint64_t>(
-            metadata.logical_size - request.offset, static_cast<std::uint64_t>(desired_window)));
-        if (remaining_window > bounded_size) {
-          should_prefetch = true;
-          read_ahead_size = remaining_window;
-        }
+    const bool large_streaming_file = metadata.logical_size >= kReadAheadLargeFileBytes;
+    const bool allow_small_request_read_ahead = large_streaming_file;
+    if (!cached_read_ahead_bytes &&
+        cache_entry.sequential_read_count >= kReadAheadTriggerSequentialReads &&
+        metadata.logical_size >= kReadAheadMinFileBytes &&
+        (bounded_size >= kReadAheadMinRequestBytes || allow_small_request_read_ahead)) {
+      const auto max_window =
+          large_streaming_file ? kReadAheadLargeFileMaxBytes : kReadAheadMaxBytes;
+      std::size_t desired_window = std::max<std::size_t>(
+          bounded_size, large_streaming_file ? kReadAheadLargeFileMinBytes : kReadAheadMinBytes);
+      if (bounded_size >= kReadAheadMinRequestBytes || large_streaming_file) {
+        const auto grown_window = bounded_size > (max_window / kReadAheadGrowthFactor)
+                                      ? max_window
+                                      : bounded_size * kReadAheadGrowthFactor;
+        desired_window = std::max<std::size_t>(desired_window, grown_window);
+      }
+      desired_window = std::min<std::size_t>(desired_window, max_window);
+      const auto remaining_window = static_cast<std::size_t>(std::min<std::uint64_t>(
+          metadata.logical_size - request.offset, static_cast<std::uint64_t>(desired_window)));
+      if (remaining_window > bounded_size) {
+        should_prefetch = true;
+        read_ahead_size = remaining_window;
       }
     }
   }

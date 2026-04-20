@@ -69,6 +69,13 @@ constexpr std::uint64_t kEmptyInodeId = 60U;
 constexpr std::uint64_t kLateDirectoryInodeId = 70U;
 constexpr std::uint64_t kLateFileInodeId = 71U;
 constexpr std::uint64_t kLateXattrFileInodeId = 80U;
+constexpr std::uint64_t kLargeSequentialInodeId = 90U;
+
+constexpr std::uint64_t kLargeSequentialDataStartBlock = 10U;
+constexpr std::uint64_t kLargeSequentialDataBlockCount = 1536U;
+constexpr std::uint64_t kLargeSequentialBlockCount =
+    kLargeSequentialDataStartBlock + kLargeSequentialDataBlockCount;
+constexpr std::string_view kLargeSequentialFileName = "stream.bin";
 
 constexpr std::string_view kAlphaExtent1 = "Hello ";
 constexpr std::string_view kAlphaExtent2 = "Orchard\n";
@@ -844,6 +851,113 @@ std::vector<VariableRecord> BuildFsRecords() {
               return MakeSyntheticFsSortKey(left.key) < MakeSyntheticFsSortKey(right.key);
             });
   return records;
+}
+
+std::vector<std::uint8_t> MakeLargeSequentialPayload() {
+  std::vector<std::uint8_t> payload(static_cast<std::vector<std::uint8_t>::size_type>(
+                                        kLargeSequentialDataBlockCount * kApfsBlockSize),
+                                    0U);
+  for (std::size_t index = 0; index < payload.size(); ++index) {
+    payload[index] = static_cast<std::uint8_t>(index % 251U);
+  }
+  return payload;
+}
+
+std::vector<VariableRecord> BuildLargeSequentialFsRecords() {
+  const auto payload = MakeLargeSequentialPayload();
+
+  std::vector<VariableRecord> records;
+  records.push_back(VariableRecord{
+      .key = MakeInodeKey(kRootInodeId),
+      .value = MakeInodeValue(kRootInodeId, 0U, 0U, 0U, 1U, 0x4000U),
+  });
+  records.push_back(VariableRecord{
+      .key = MakeInodeKey(kLargeSequentialInodeId),
+      .value = MakeInodeValue(kRootInodeId, payload.size(), payload.size(), 0U, 0U, 0x8000U),
+  });
+  records.push_back(VariableRecord{
+      .key = MakeNamedKey(kRootInodeId, orchard::apfs::FsRecordType::kDirRecord,
+                          kLargeSequentialFileName),
+      .value = MakeDirectoryValue(kLargeSequentialInodeId),
+  });
+  records.push_back(VariableRecord{
+      .key = MakeFileExtentKey(kLargeSequentialInodeId, 0U),
+      .value = MakeFileExtentValue(payload.size(), kLargeSequentialDataStartBlock),
+  });
+
+  std::sort(records.begin(), records.end(),
+            [](const VariableRecord& left, const VariableRecord& right) {
+              return MakeSyntheticFsSortKey(left.key) < MakeSyntheticFsSortKey(right.key);
+            });
+  return records;
+}
+
+std::vector<std::uint8_t> MakeLargeSequentialFixture() {
+  std::vector<std::uint8_t> bytes(static_cast<std::vector<std::uint8_t>::size_type>(
+                                      kApfsBlockSize * kLargeSequentialBlockCount),
+                                  0U);
+
+  WriteNxSuperblock(bytes, 0U, 1U);
+  WriteLe64(bytes, 0x28U, kLargeSequentialBlockCount);
+  WriteNxSuperblock(bytes, kApfsBlockSize, kCurrentCheckpointXid);
+  WriteLe64(bytes, kApfsBlockSize + 0x28U, kLargeSequentialBlockCount);
+  WriteOmapSuperblock(bytes, kApfsBlockSize * kContainerOmapObjectBlock, kContainerOmapObjectBlock,
+                      kCurrentCheckpointXid, kContainerOmapRootBlock);
+  WriteOmapRootNode(bytes, kApfsBlockSize * kContainerOmapRootBlock, kContainerOmapRootBlock,
+                    kCurrentCheckpointXid, kVolumeObjectId, 20U, kContainerOmapLeafBlock);
+  WriteOmapLeafNode(bytes, kApfsBlockSize * kContainerOmapLeafBlock, kContainerOmapLeafBlock,
+                    kCurrentCheckpointXid,
+                    {
+                        OmapLeafRecord{
+                            .oid = kVolumeObjectId,
+                            .xid = 20U,
+                            .flags = 0U,
+                            .physical_block = kLegacyVolumeBlock,
+                        },
+                        OmapLeafRecord{
+                            .oid = kVolumeObjectId,
+                            .xid = kCurrentCheckpointXid,
+                            .flags = 0U,
+                            .physical_block = kCurrentVolumeBlock,
+                        },
+                        OmapLeafRecord{
+                            .oid = kVolumeOmapObjectId,
+                            .xid = kCurrentCheckpointXid,
+                            .flags = 0U,
+                            .physical_block = kVolumeOmapBlock,
+                        },
+                    },
+                    0U);
+  WriteVolumeSuperblock(bytes, kApfsBlockSize * kLegacyVolumeBlock, 20U,
+                        orchard::apfs::kVolumeIncompatCaseInsensitive,
+                        orchard::apfs::kVolumeRoleData, "Legacy Large Stream");
+  WriteVolumeSuperblock(bytes, kApfsBlockSize * kCurrentVolumeBlock, kCurrentCheckpointXid,
+                        orchard::apfs::kVolumeIncompatCaseInsensitive,
+                        orchard::apfs::kVolumeRoleData, "Large Stream");
+  WriteOmapSuperblock(bytes, kApfsBlockSize * kVolumeOmapBlock, kVolumeOmapObjectId,
+                      kCurrentCheckpointXid, kVolumeOmapRootBlock);
+  WriteOmapLeafNode(bytes, kApfsBlockSize * kVolumeOmapRootBlock, kVolumeOmapRootBlock,
+                    kCurrentCheckpointXid,
+                    {
+                        OmapLeafRecord{
+                            .oid = kFsTreeObjectId,
+                            .xid = kCurrentCheckpointXid,
+                            .flags = 0U,
+                            .physical_block = kFsTreeBlock,
+                        },
+                    },
+                    orchard::apfs::kBtreeNodeFlagRoot);
+  WriteVariableBtreeRootLeafNode(bytes, kApfsBlockSize * kFsTreeBlock, kFsTreeObjectId,
+                                 kCurrentCheckpointXid, orchard::apfs::kObjectTypeFs,
+                                 BuildLargeSequentialFsRecords());
+
+  const auto payload = MakeLargeSequentialPayload();
+  const auto payload_base =
+      static_cast<std::size_t>(kLargeSequentialDataStartBlock * kApfsBlockSize);
+  std::copy(payload.begin(), payload.end(),
+            bytes.begin() + static_cast<std::ptrdiff_t>(payload_base));
+
+  return bytes;
 }
 
 std::vector<std::uint8_t> MakeDirectFixture(const FixtureOptions& options = {}) {
@@ -2196,6 +2310,53 @@ void WinFspMountedVolumeDoesNotReadAheadSmallSequentialReads() {
   ORCHARD_TEST_REQUIRE(mounted_stats.read_ahead_hits == 0U);
 }
 
+void WinFspMountedVolumeReadAheadPrefetchesLargeStreamingReads() {
+  const auto temp_path =
+      std::filesystem::temp_directory_path() / "orchard_apfs_mount_read_ahead_large.img";
+  const auto bytes = MakeLargeSequentialFixture();
+
+  {
+    std::ofstream output(temp_path, std::ios::binary);
+    output.write(reinterpret_cast<const char*>(bytes.data()),
+                 static_cast<std::streamsize>(bytes.size()));
+  }
+
+  orchard::fs_winfsp::MountConfig config;
+  config.target_path = temp_path;
+  config.mount_point = L"V:";
+
+  const auto mounted_volume_result = orchard::fs_winfsp::OpenMountedVolume(config);
+  ORCHARD_TEST_REQUIRE(mounted_volume_result.ok());
+
+  const auto file_result =
+      mounted_volume_result.value()->ResolveFileNode("/" + std::string(kLargeSequentialFileName));
+  ORCHARD_TEST_REQUIRE(file_result.ok());
+
+  const auto payload = MakeLargeSequentialPayload();
+  constexpr std::size_t kRequestSize = 768U * 1024U;
+  for (std::size_t request_index = 0; request_index < 5U; ++request_index) {
+    orchard::apfs::FileReadRequest request;
+    request.inode_id = file_result.value().inode_id;
+    request.offset = static_cast<std::uint64_t>(request_index * kRequestSize);
+    request.size = kRequestSize;
+
+    const auto bytes_result =
+        mounted_volume_result.value()->ReadFileRange(file_result.value(), request);
+    ORCHARD_TEST_REQUIRE(bytes_result.ok());
+    ORCHARD_TEST_REQUIRE(bytes_result.value().size() == kRequestSize);
+    ORCHARD_TEST_REQUIRE(
+        std::equal(bytes_result.value().begin(), bytes_result.value().end(),
+                   payload.begin() + static_cast<std::ptrdiff_t>(request.offset),
+                   payload.begin() + static_cast<std::ptrdiff_t>(request.offset + request.size)));
+  }
+
+  const auto mounted_stats = mounted_volume_result.value()->performance_stats();
+  ORCHARD_TEST_REQUIRE(mounted_stats.read_ahead_prefetches >= 2U);
+  ORCHARD_TEST_REQUIRE(mounted_stats.read_ahead_hits >= 1U);
+
+  std::filesystem::remove(temp_path);
+}
+
 void WinFspMountedVolumeCachesCompressionInfoForPrimedRegularFiles() {
   orchard::fs_winfsp::MountConfig config;
   config.target_path = SampleFixturePath("plain-user-data.img");
@@ -2797,6 +2958,8 @@ int main() {
        &WinFspMountedVolumeCachesRepeatedFileReadRanges},
       {"WinFspMountedVolumeDoesNotReadAheadSmallSequentialReads",
        &WinFspMountedVolumeDoesNotReadAheadSmallSequentialReads},
+      {"WinFspMountedVolumeReadAheadPrefetchesLargeStreamingReads",
+       &WinFspMountedVolumeReadAheadPrefetchesLargeStreamingReads},
       {"WinFspMountedVolumeCachesCompressionInfoForPrimedRegularFiles",
        &WinFspMountedVolumeCachesCompressionInfoForPrimedRegularFiles},
       {"WinFspMountedVolumeTracksReadTelemetryBuckets",
